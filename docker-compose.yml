@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  ctyun-dashboard:
+    build: .
+    image: ctyun-dashboard:latest
+    container_name: ctyun-dashboard
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - TZ=Asia/Shanghai
+      - PORT=8080
+      - CTYUN_DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data

@@ -1,0 +1,17 @@
+# 依赖目录
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 生产运行时用户数据 (容器挂载目录，不纳入版本控制以保护密码隐私)
+data/*
+!data/devices/
+!data/devices/.gitkeep
+
+# 临时文件与日志
+*.log
+test_*.js
+*.tmp
+.DS_Store
+Thumbs.db

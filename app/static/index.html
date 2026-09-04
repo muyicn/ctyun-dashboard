@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>天翼云电脑多账号管理与保活控制台</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <!-- 顶部导航 -->
+    <header>
+      <div class="logo-group">
+        <div class="logo-icon">☁️</div>
+        <div class="title-group">
+          <h1>天翼云自动化控制中心</h1>
+          <p style="font-size: 13px; color: var(--text-muted); margin-top: 2px;">多账号长连接保活守护 · 每日签到打卡 · 智能挂机 · 自动兑换</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <!-- 多用户登录与操作状态 (未登录时仅显示登录/注册，登录后呈现全部管理功能) -->
+        <div id="user-status-bar" style="display: flex; align-items: center; gap: 8px; margin-right: 4px;">
+          <span id="user-info-text" style="font-size: 13px; color: var(--text-muted);">正在加载身份...</span>
+          <button class="btn btn-sm hidden" id="btn-change-pwd" onclick="openChangePwdModal()">🔒 修改密码</button>
+          <button class="btn btn-sm hidden" id="btn-admin-users" onclick="openAdminUsersModal()">👥 用户管理</button>
+          <button class="btn btn-sm" id="btn-auth-action" onclick="openAuthModal()">登录/注册</button>
+        </div>
+        <!-- 登录后才可见的操作按钮组 -->
+        <div id="logged-actions-group" class="hidden" style="display: flex; gap: 8px;">
+          <button class="btn btn-primary" onclick="openAddAccountModal()">➕ 添加账号</button>
+          <button class="btn" onclick="openBackupModal()">📦 备份/还原</button>
+          <button class="btn" onclick="openSettingsModal()">⚙️ 系统设置</button>
+          <button class="btn btn-warning" onclick="restartKeeper()">🔄 重启保活</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- 统计卡片 (未登录时不渲染显示) -->
+    <div class="stats-grid hidden" id="main-stats-grid">
+      <div class="stat-card">
+        <div class="stat-icon">👥</div>
+        <div class="stat-info">
+          <div class="stat-value" id="stat-total">0</div>
+          <div class="stat-label">配置账号总数</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon">📡</div>
+        <div class="stat-info">
+          <div class="stat-value" id="stat-online">0</div>
+          <div class="stat-label">保活在线状态</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon">📅</div>
+        <div class="stat-info">
+          <div class="stat-value" id="stat-signed">0</div>
+          <div class="stat-label">今日已签到</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon">🎁</div>
+        <div class="stat-info">
+          <div class="stat-value" id="stat-points">300</div>
+          <div class="stat-label">每日预计可得积分</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 账号列表区域 -->
+    <div class="section-header hidden" id="main-section-header">
+      <div class="section-title">
+        <span>📋</span> 账号管理与自动化配置
+      </div>
+      <button class="btn btn-sm" onclick="loadAccounts()">🔄 刷新列表</button>
+    </div>
+
+    <div class="accounts-grid" id="accounts-container">
+      <!-- 动态加载账号卡片 -->
+    </div>
+
+    <!-- 实时控制台日志 (未登录时不渲染显示) -->
+    <div class="log-panel hidden" id="main-log-panel">
+      <div class="log-header">
+        <div style="font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 8px;">
+          <span>💻</span> 控制台实时日志 (<span id="log-status" style="color: #16a34a;">已连接</span>)
+          <div style="display: flex; gap: 6px; margin-left: 12px;">
+            <button class="btn btn-sm btn-primary" id="tab-tasks" onclick="switchLogFilter('tasks')">🎯 任务反馈</button>
+            <button class="btn btn-sm" id="tab-heartbeat" onclick="switchLogFilter('heartbeat')">📡 心跳保活</button>
+            <button class="btn btn-sm" id="tab-all" onclick="switchLogFilter('all')">📄 全部日志</button>
+          </div>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-sm" onclick="clearLogs()">清屏</button>
+          <button class="btn btn-sm" id="btn-autoscroll" onclick="toggleAutoScroll()">自动滚动: 开</button>
+        </div>
+      </div>
+      <div class="log-content" id="log-content">
+        <div class="log-line"><span class="log-time">[系统]</span> 等待日志流就绪...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 添加/编辑账号模态框 -->
+  <div class="modal-backdrop hidden" id="account-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="modal-account-title">添加天翼云账号</h3>
+        <button class="modal-close" onclick="closeModal('account-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="acc-id">
+        <div class="form-group">
+          <label>账号备注名</label>
+          <input type="text" class="form-control" id="acc-name" placeholder="例如：主账号 / 小号1">
+        </div>
+        <div class="form-group">
+          <label>手机号 / 天翼账号 <span style="color:red">*</span></label>
+          <input type="text" class="form-control" id="acc-user" placeholder="请输入天翼云绑定的手机号">
+        </div>
+        <div class="form-group">
+          <label>密码 <span style="color:red">*</span></label>
+          <input type="password" class="form-control" id="acc-password" placeholder="请输入登录密码">
+        </div>
+        <div class="form-group">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <label>设备码 (DeviceCode)</label>
+            <a href="javascript:void(0)" onclick="generateNewDeviceCode()" style="font-size: 12px; color: var(--accent);">重新随机生成</a>
+          </div>
+          <input type="text" class="form-control" id="acc-device-code" placeholder="留空则系统自动随机生成32位持久设备码">
+          <div class="form-text">提示：持久化设备码可避免每次登录被风控要求短信验证码。</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('account-modal')">取消</button>
+        <button class="btn btn-primary" onclick="saveAccount()">保存账号</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 短信验证码绑定设备模态框 -->
+  <div class="modal-backdrop hidden" id="sms-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>绑定新设备 - 短信验证</h3>
+        <button class="modal-close" onclick="closeModal('sms-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="sms-acc-id">
+        <p style="font-size: 13px; color: var(--text-muted);">
+          由于当前设备首次登录或安全风控策略，天翼云需要向手机号验证授权。验证后将永久信任该设备码！
+        </p>
+        <div class="form-group">
+          <label>目标手机号</label>
+          <input type="text" class="form-control" id="sms-phone" readonly disabled>
+        </div>
+        <div class="form-group">
+          <label>短信验证码</label>
+          <div style="display: flex; gap: 10px;">
+            <input type="text" class="form-control" id="sms-code" placeholder="请输入6位验证码">
+            <button class="btn btn-primary" id="btn-send-sms" onclick="sendSmsCode()" style="white-space: nowrap;">获取验证码</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('sms-modal')">取消</button>
+        <button class="btn btn-success" onclick="submitSmsBind()">确认绑定设备</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 自动兑换与抽奖设置模态框 -->
+  <div class="modal-backdrop hidden" id="redeem-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>🎁 自动兑换与抽奖配置</h3>
+        <button class="modal-close" onclick="closeModal('redeem-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="redeem-acc-id">
+        <div class="form-group">
+          <label>功能总开关</label>
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <label class="switch">
+              <input type="checkbox" id="redeem-enabled">
+              <span class="slider"></span>
+            </label>
+            <span style="font-size: 13px;" id="redeem-enabled-label">未启用</span>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>目标操作模式</label>
+          <select class="form-control" id="redeem-target-type" onchange="onTargetTypeChange()">
+            <option value="redeem">积分商城兑换（如长期维持8C16G）</option>
+            <option value="lottery">每日积分幸运抽奖</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>选择兑换商品 / 抽奖项目</label>
+          <select class="form-control" id="redeem-product-select" onchange="onProductSelectChange()">
+            <!-- 动态加载商城奖品 -->
+          </select>
+        </div>
+
+        <div class="form-group" id="group-desktop-select">
+          <label>绑定目标云电脑 (用于配置升级)</label>
+          <select class="form-control" id="redeem-desktop-select">
+            <option value="">正在获取名下设备...</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>兑换时间策略</label>
+          <select class="form-control" id="redeem-schedule-type" onchange="onScheduleTypeChange()">
+            <option value="monthly_days">每月指定日期兑换（推荐：保持长期8C16G）</option>
+            <option value="daily">每日自动兑换</option>
+            <option value="interval_days">每隔 N 天兑换一次</option>
+          </select>
+        </div>
+
+        <div class="form-group" id="group-monthly-days">
+          <label>每月兑换日期 (逗号分隔，-1 表示月末最后一天)</label>
+          <input type="text" class="form-control" id="redeem-monthly-days" value="-1" placeholder="如 -1 或 1,15,28">
+          <div class="form-text">强烈推荐填 <code>-1</code>：每月最后一天升级，可无缝保持下个月持续处于 8C16G 高配状态！</div>
+        </div>
+
+        <div class="form-group hidden" id="group-interval-days">
+          <label>间隔天数 N</label>
+          <input type="number" class="form-control" id="redeem-interval-days" value="1" min="1">
+        </div>
+
+        <div class="form-group">
+          <label>每次最大执行次数</label>
+          <input type="number" class="form-control" id="redeem-max-times" value="0" min="0">
+          <div class="form-text">0 表示按账户积分余额尽量兑换到底，非0则限制单次最多兑换几次。</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('redeem-modal')">取消</button>
+        <button class="btn btn-primary" onclick="saveRedeemConfig()">保存兑换设置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 系统设置模态框 -->
+  <div class="modal-backdrop hidden" id="settings-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>⚙️ 全局系统与定时调度设置</h3>
+        <button class="modal-close" onclick="closeModal('settings-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <h4 style="font-size: 14px; margin-top: 4px; color: var(--accent);">⏰ 定时任务 Cron 表达式 (北京时间)</h4>
+        <div class="form-group">
+          <label>每日签到打卡时间</label>
+          <input type="text" class="form-control" id="cron-sign" value="0 2 * * *">
+          <div class="form-text">默认每天凌晨 02:00 自动执行</div>
+        </div>
+        <div class="form-group">
+          <label>AI 智能对话积分时间</label>
+          <input type="text" class="form-control" id="cron-aichat" value="0 3,20 * * *">
+          <div class="form-text">默认每天 03:00 与 20:00 执行</div>
+        </div>
+        <div class="form-group">
+          <label>云电脑挂机 1 小时时间</label>
+          <input type="text" class="form-control" id="cron-hang" value="0 4,6 * * *">
+          <div class="form-text">默认每天 04:00 与 06:00 执行</div>
+        </div>
+        <div class="form-group">
+          <label>自动兑换与抽奖检查时间</label>
+          <input type="text" class="form-control" id="cron-redeem" value="0 7 * * *">
+          <div class="form-text">默认每天 07:00 执行兑换检查</div>
+        </div>
+
+        <h4 style="font-size: 14px; margin-top: 14px; color: var(--accent);">📡 保活与连接参数</h4>
+        <div class="form-group">
+          <label>保活强制重连周期 (秒)</label>
+          <input type="number" class="form-control" id="set-keepalive-sec" value="60" min="10">
+          <div class="form-text">建议保持默认 60 秒，周期性主动维持天翼长连接</div>
+        </div>
+
+        <h4 style="font-size: 14px; margin-top: 14px; color: var(--accent);">👥 多用户开放注册与默认配额</h4>
+        <div class="form-group">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <label class="switch">
+              <input type="checkbox" id="set-allow-reg" checked>
+              <span class="slider"></span>
+            </label>
+            <span style="font-size: 13px;">开放新用户自行注册</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>普通用户默认添加云电脑配额上限 (台)</label>
+          <input type="number" class="form-control" id="set-default-quota" value="2" min="1">
+          <div class="form-text">新用户注册后默认允许添加的云电脑最大数量，管理员可在“用户配额管理”随时提高或降低。</div>
+        </div>
+
+        <h4 style="font-size: 14px; margin-top: 14px; color: var(--accent);">🔔 消息通知推送 (可选)</h4>
+        <div class="form-group">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <label class="switch">
+              <input type="checkbox" id="notify-enabled">
+              <span class="slider"></span>
+            </label>
+            <span style="font-size: 13px;">开启任务结果消息推送</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>推送渠道</label>
+          <select class="form-control" id="notify-channel" onchange="onNotifyChannelChange()">
+            <option value="webhook">通用 Webhook (JSON)</option>
+            <option value="qywx">企业微信机器人 (WeChat Work)</option>
+            <option value="serverchan">Server 酱 (Turbo)</option>
+            <option value="pushplus">PushPlus (推送加)</option>
+            <option value="bark">Bark (iOS)</option>
+            <option value="telegram">Telegram 机器人</option>
+          </select>
+        </div>
+        <div class="form-group" id="group-notify-token">
+          <label id="notify-token-label">Webhook URL</label>
+          <input type="text" class="form-control" id="notify-token" placeholder="请输入对应 Key 或 URL">
+        </div>
+        <div class="form-group">
+          <label>自定义通知标题模板 (留空默认)</label>
+          <input type="text" class="form-control" id="notify-title-tpl" placeholder="{title} - {account}">
+        </div>
+        <div class="form-group">
+          <label>自定义通知内容模板 (留空默认)</label>
+          <textarea class="form-control" id="notify-content-tpl" rows="2" placeholder="{content}"></textarea>
+          <div class="form-text">支持插值变量：<code>{title}</code>、<code>{content}</code>、<code>{account}</code>、<code>{task}</code>、<code>{status}</code>、<code>{time}</code></div>
+        </div>
+        <div style="display:flex; justify-content:flex-end; margin-top:4px;">
+          <button class="btn btn-sm btn-success" type="button" onclick="testNotification()">📨 立即测试推送</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('settings-modal')">取消</button>
+        <button class="btn btn-primary" onclick="saveSettings()">保存系统配置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 配置备份与还原模态框 -->
+  <div class="modal-backdrop hidden" id="backup-modal">
+    <div class="modal" style="max-width: 600px;">
+      <div class="modal-header">
+        <h3>📦 配置导出与备份还原</h3>
+        <button class="modal-close" onclick="closeModal('backup-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="background: #ffffff; padding: 14px; border-radius: 8px; border: 1px solid var(--border); box-shadow: 0 1px 3px rgba(0,0,0,0.02);">
+          <h4 style="font-size: 14px; font-weight: 700; color: #0f172a; margin-bottom: 6px;">📥 导出配置备份 (JSON)</h4>
+          <p style="font-size: 12.5px; color: var(--text-muted); margin-bottom: 12px;">
+            一键下载当前名下所有天翼云账号、分辨率、自动兑换与系统设置的完整 JSON 备份文件。
+          </p>
+          <button class="btn btn-primary" onclick="exportConfigJson()">⬇️ 导出并下载配置文件</button>
+        </div>
+
+        <div style="background: #ffffff; padding: 14px; border-radius: 8px; border: 1px solid var(--border); box-shadow: 0 1px 3px rgba(0,0,0,0.02); margin-top: 10px;">
+          <h4 style="font-size: 14px; font-weight: 700; color: #0f172a; margin-bottom: 6px;">📤 导入还原配置 (JSON)</h4>
+          <p style="font-size: 12.5px; color: var(--text-muted); margin-bottom: 10px;">
+            上传之前备份的 JSON 文件即可一键批量导入所有账号，系统将自动唤醒所有云电脑长连接保活！
+          </p>
+          <div class="form-group" style="margin-bottom: 10px;">
+            <label>导入模式</label>
+            <select class="form-control" id="import-mode-select">
+              <option value="merge">增量合并导入 (保留当前已有，同手机号则更新)</option>
+              <option value="overwrite">完全覆盖导入 (清空当前账号列表，以此文件为准)</option>
+            </select>
+          </div>
+          <input type="file" id="import-file-input" accept=".json" style="display: none;" onchange="handleFileSelected(this)">
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <button class="btn btn-success" onclick="document.getElementById('import-file-input').click()">📂 选择并上传 JSON 文件</button>
+            <span id="import-file-name" style="font-size: 12.5px; color: var(--text-muted);">未选择文件</span>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('backup-modal')">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 用户登录/注册模态框 -->
+  <div class="modal-backdrop hidden" id="auth-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="auth-modal-title">用户登录</h3>
+        <button class="modal-close" onclick="closeModal('auth-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="display: flex; gap: 10px; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 6px;">
+          <button class="btn btn-sm btn-primary" id="btn-auth-tab-login" onclick="switchAuthMode('login')">用户登录</button>
+          <button class="btn btn-sm" id="btn-auth-tab-reg" onclick="switchAuthMode('register')">新用户注册</button>
+        </div>
+        <div class="form-group">
+          <label>用户名</label>
+          <input type="text" class="form-control" id="auth-username" placeholder="请输入用户名">
+        </div>
+        <div class="form-group">
+          <label>密码</label>
+          <input type="password" class="form-control" id="auth-password" placeholder="请输入密码">
+        </div>
+        <div id="auth-tip" class="form-text"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('auth-modal')">取消</button>
+        <button class="btn btn-primary" id="btn-auth-submit" onclick="submitAuth()">登录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 修改个人密码模态框 -->
+  <div class="modal-backdrop hidden" id="change-pwd-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>🔒 修改个人登录密码</h3>
+        <button class="modal-close" onclick="closeModal('change-pwd-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>新密码</label>
+          <input type="password" class="form-control" id="new-user-pwd" placeholder="请输入至少5位的新密码">
+        </div>
+        <div class="form-group">
+          <label>确认新密码</label>
+          <input type="password" class="form-control" id="confirm-user-pwd" placeholder="请再次输入新密码">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('change-pwd-modal')">取消</button>
+        <button class="btn btn-primary" onclick="submitChangePassword()">确认修改</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 云电脑分辨率与缩放比设置模态框 -->
+  <div class="modal-backdrop hidden" id="display-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>🖥️ 云电脑分辨率与缩放设置</h3>
+        <button class="modal-close" onclick="closeModal('display-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="display-acc-id">
+        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 4px;">
+          设置后台挂机与任务登录时模拟的真实显示分辨率。系统将自动锁定此项参数，防止云电脑被意外降级到低分辨率。
+        </p>
+        <div class="form-group">
+          <label>快捷选择常用分辨率与缩放</label>
+          <select class="form-control" id="display-preset-select" onchange="onDisplayPresetChange()">
+            <option value="2560x1440@150">2560 × 1440 (2K高清) - 缩放 150% 【推荐】</option>
+            <option value="2560x1440@125">2560 × 1440 (2K高清) - 缩放 125%</option>
+            <option value="2560x1440@100">2560 × 1440 (2K高清) - 缩放 100%</option>
+            <option value="1920x1080@125">1920 × 1080 (1080P) - 缩放 125%</option>
+            <option value="1920x1080@100">1920 × 1080 (1080P) - 缩放 100%</option>
+            <option value="3840x2160@200">3840 × 2160 (4K超清) - 缩放 200%</option>
+            <option value="custom">自定义分辨率与缩放比</option>
+          </select>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div class="form-group">
+            <label>水平宽度 (Width, 像素)</label>
+            <input type="number" class="form-control" id="disp-width" value="2560" min="800" max="7680">
+          </div>
+          <div class="form-group">
+            <label>垂直高度 (Height, 像素)</label>
+            <input type="number" class="form-control" id="disp-height" value="1440" min="600" max="4320">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>DPI 屏幕缩放比例 (Scale, %)</label>
+          <input type="number" class="form-control" id="disp-scale" value="150" min="100" max="300" step="25">
+          <div class="form-text">如 150 表示 150% 缩放 (对应 devicePixelRatio = 1.5)。</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('display-modal')">取消</button>
+        <button class="btn btn-primary" onclick="saveDisplayConfig()">保存分辨率设置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 管理员：修改任意用户密码模态框 -->
+  <div class="modal-backdrop hidden" id="admin-user-pwd-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>🔑 修改指定用户密码</h3>
+        <button class="modal-close" onclick="closeModal('admin-user-pwd-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="admin-edit-user-id">
+        <div class="form-group">
+          <label>目标用户</label>
+          <input type="text" class="form-control" id="admin-edit-username" readonly disabled>
+        </div>
+        <div class="form-group">
+          <label>设置新密码</label>
+          <input type="password" class="form-control" id="admin-set-new-pwd" placeholder="请输入新密码 (至少5位)">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('admin-user-pwd-modal')">取消</button>
+        <button class="btn btn-primary" onclick="submitAdminUserPassword()">确认更新密码</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 管理员：用户配额管理模态框 -->
+  <div class="modal-backdrop hidden" id="admin-users-modal">
+    <div class="modal" style="max-width: 720px;">
+      <div class="modal-header">
+        <h3>👥 平台用户与云电脑配额管理</h3>
+        <button class="modal-close" onclick="closeModal('admin-users-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 6px;">
+          管理员可以查看所有已注册用户，修改任何用户的云电脑添加配额（调高或调低数量限制）。
+        </p>
+        <div style="overflow-x: auto;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: left;">
+            <thead>
+              <tr style="border-bottom: 1px solid var(--border); color: var(--accent);">
+                <th style="padding: 8px;">用户名</th>
+                <th style="padding: 8px;">角色</th>
+                <th style="padding: 8px;">已添加云电脑</th>
+                <th style="padding: 8px;">允许添加上限(配额)</th>
+                <th style="padding: 8px;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="admin-users-tbody">
+              <!-- 动态加载用户列表 -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('admin-users-modal')">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast 浮动提示容器 -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
