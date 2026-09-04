@@ -1491,7 +1491,7 @@ const server = http.createServer(async (req, res) => {
       }));
       jsonResponse(res, formatted);
     } catch (e) {
-      jsonResponse(res, [{ desktopId: '19728186', desktopName: '云电脑', useStatusText: '运行中' }]);
+      jsonResponse(res, []);
     }
     return;
   }

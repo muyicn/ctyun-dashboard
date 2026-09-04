@@ -9,8 +9,10 @@ ENV TZ=Asia/Shanghai \
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# 仅安装无头浏览器 Chromium、中文字体与必要证书，完成后清理 apt 缓存
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 换用阿里云国内镜像源，并使用 --no-install-recommends 最小化安装 Chromium
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true && \
+    apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     fonts-wqy-microhei \
     ca-certificates \
@@ -19,8 +21,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY package.json ./
 
-# 安装纯生产依赖并清理非 Linux 二进制包进一步缩减镜像体积
-RUN npm install --production --no-audit && \
+# 配置 npm 国内镜像源，安装纯生产依赖并清理其他平台的无用二进制库
+RUN npm config set registry https://registry.npmmirror.com && \
+    npm install --production --no-audit && \
     rm -rf /root/.npm \
     node_modules/onnxruntime-node/bin/napi-v6/darwin \
     node_modules/onnxruntime-node/bin/napi-v6/win32

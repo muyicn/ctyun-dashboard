@@ -14,3 +14,9 @@ services:
       - CTYUN_DATA_DIR=/app/data
     volumes:
       - ./data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+        reservations:
+          memory: 128M
