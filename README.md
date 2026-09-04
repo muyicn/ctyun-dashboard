@@ -30,7 +30,36 @@
 
 ## 🚀 三、Docker 快速部署与运行
 
-### 方式一：Docker Compose（推荐）
+### 方式一：直接拉取预构建镜像（最推荐、飞牛 NAS 专用）
+
+无需在 NAS 本地耗时编译，直接拉取 GitHub 自动构建好的预编译轻量镜像：
+
+```bash
+docker run -d \
+  --name ctyun-dashboard \
+  -p 8080:8080 \
+  -v $(pwd)/data:/app/data \
+  --restart unless-stopped \
+  ghcr.io/muyicn/ctyun-dashboard:latest
+```
+
+或在 `docker-compose.yml` 中使用：
+```yaml
+version: '3.8'
+services:
+  ctyun-dashboard:
+    image: ghcr.io/muyicn/ctyun-dashboard:latest
+    container_name: ctyun-dashboard
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+```
+
+---
+
+### 方式二：本地源码 Compose 快速构建（推荐开发者）
 
 1. 进入项目根目录：
    ```bash
@@ -39,7 +68,7 @@
 
 2. 启动服务：
    ```bash
-   docker-compose up -d
+   docker compose up -d --build
    ```
 
 3. 浏览器访问控制台：
