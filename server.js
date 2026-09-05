@@ -2,6 +2,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const net = require('net');
 const LightweightOcr = require('./app/lightweight_ocr');
 const CtYunEncryption = require('./app/ctyun_encryption');
 const { executeRealAiChat, executeRealHang } = require('./app/tasks/real_tasks');
@@ -113,12 +114,63 @@ function generateDeviceCode() {
   return 'web_' + s;
 }
 
-// Webhook 通知服务（支持完全自定义标题与内容模板及参数替换）
+// SSRF 防护：校验 URL 是否为安全的外部公共 HTTP/HTTPS 地址
+function isPrivateIpOrHost(hostname) {
+  const h = (hostname || '').toLowerCase().trim();
+  if (!h) return true;
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '0.0.0.0') return true;
+  if (h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.lan')) return true;
+
+  if (net.isIPv4(h)) {
+    const parts = h.split('.').map(Number);
+    if (parts[0] === 127) return true; // 127.0.0.0/8 loopback
+    if (parts[0] === 10) return true;  // 10.0.0.0/8 private
+    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true; // 172.16.0.0/12 private
+    if (parts[0] === 192 && parts[1] === 168) return true; // 192.168.0.0/16 private
+    if (parts[0] === 169 && parts[1] === 254) return true; // 169.254.0.0/16 link-local / cloud metadata
+    if (parts[0] === 0) return true;   // 0.0.0.0/8 current network
+  }
+
+  if (net.isIPv6(h)) {
+    if (h === '::1' || h === '::') return true;
+    if (h.startsWith('fe80:')) return true; // link-local
+    if (h.startsWith('fc00:') || h.startsWith('fd00:')) return true; // ULA
+  }
+
+  return false;
+}
+
+function isValidWebhookUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  try {
+    const u = new URL(rawUrl.trim());
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    if (isPrivateIpOrHost(u.hostname)) return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 资源归属权鉴权辅助：确保用户只能管理自己名下的账号，admin 可管理全部
+function canUserAccessAccount(session, account) {
+  if (!session || !account) return false;
+  if (session.role === 'admin') return true;
+  return account.ownerId === session.userId;
+}
+
+// Webhook 通知服务（支持完全自定义标题与内容模板及参数替换，集成 SSRF 防护）
 async function sendNotification(settings, title, content, extraVars = {}) {
   const notify = settings?.notify;
   if (!notify || !notify.enabled) return { success: false, message: '通知未开启' };
 
   const channel = notify.channel || 'webhook';
+
+  // SSRF 安全防御校验
+  if (notify.webhookUrl && !isValidWebhookUrl(notify.webhookUrl)) {
+    appendLog('Notify', `[安全拦截] 拒绝向私有/内网或非法协议地址发送 Webhook: ${notify.webhookUrl}`, 'error');
+    return { success: false, message: '安全拦截：禁止向内网/本地私有地址或非法协议发送 Webhook' };
+  }
   
   // 模板变量替换
   let finalTitle = notify.customTitleTemplate || title;
@@ -1020,8 +1072,12 @@ const server = http.createServer(async (req, res) => {
   // 5. 管理员用户管理 API
   if (pathname.startsWith('/api/admin/users')) {
     const session = getSessionFromReq(req);
-    // 保护接口：必须是管理员
-    if (session && session.role !== 'admin') {
+    // 严格鉴权：未登录返回 401，非管理员返回 403
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+    if (session.role !== 'admin') {
       jsonResponse(res, { error: '权限不足：仅管理员可访问' }, 403);
       return;
     }
@@ -1248,12 +1304,24 @@ const server = http.createServer(async (req, res) => {
 
   // 9. 更新账号
   if (req.method === 'PUT' && pathname.startsWith('/api/accounts/')) {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+
     const accId = pathname.split('/')[3];
     const acc = appConfig.accounts.find(a => a.id === accId);
     if (!acc) {
       jsonResponse(res, { error: '账号不存在' }, 404);
       return;
     }
+
+    if (!canUserAccessAccount(session, acc)) {
+      jsonResponse(res, { error: '权限不足：无权修改该云电脑账号' }, 403);
+      return;
+    }
+
     const body = await parseJsonBody(req);
     if (body.name) acc.name = body.name;
     if (body.user) acc.user = body.user;
@@ -1282,7 +1350,24 @@ const server = http.createServer(async (req, res) => {
 
   // 10. 删除账号
   if (req.method === 'DELETE' && pathname.startsWith('/api/accounts/')) {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+
     const accId = pathname.split('/')[3];
+    const acc = appConfig.accounts.find(a => a.id === accId);
+    if (!acc) {
+      jsonResponse(res, { error: '账号不存在' }, 404);
+      return;
+    }
+
+    if (!canUserAccessAccount(session, acc)) {
+      jsonResponse(res, { error: '权限不足：无权删除该云电脑账号' }, 403);
+      return;
+    }
+
     const idx = appConfig.accounts.findIndex(a => a.id === accId);
     if (idx >= 0) {
       const deleted = appConfig.accounts.splice(idx, 1)[0];
@@ -1301,18 +1386,35 @@ const server = http.createServer(async (req, res) => {
 
   // 11. 生成设备码
   if (req.method === 'POST' && pathname === '/api/device/generate') {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
     jsonResponse(res, { deviceCode: generateDeviceCode() });
     return;
   }
 
   // 12. 发送短信验证码
   if (req.method === 'POST' && pathname.includes('/send-sms')) {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+
     const accId = pathname.split('/')[3];
     const acc = appConfig.accounts.find(a => a.id === accId);
     if (!acc) {
       jsonResponse(res, { error: '账号不存在' }, 404);
       return;
     }
+
+    if (!canUserAccessAccount(session, acc)) {
+      jsonResponse(res, { error: '权限不足：无权操作该云电脑账号' }, 403);
+      return;
+    }
+
     const client = getClient(acc);
     try {
       appendLog('Auth', `[${acc.name}] 正在请求天翼云下发设备绑定验证码...`, 'info');
@@ -1335,12 +1437,24 @@ const server = http.createServer(async (req, res) => {
 
   // 13. 绑定短信验证码
   if (req.method === 'POST' && pathname.includes('/bind-sms')) {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+
     const accId = pathname.split('/')[3];
     const acc = appConfig.accounts.find(a => a.id === accId);
     if (!acc) {
       jsonResponse(res, { error: '账号不存在' }, 404);
       return;
     }
+
+    if (!canUserAccessAccount(session, acc)) {
+      jsonResponse(res, { error: '权限不足：无权操作该云电脑账号' }, 403);
+      return;
+    }
+
     const body = await parseJsonBody(req);
     const code = (body.verificationCode || '').trim();
     if (!code) {
@@ -1370,12 +1484,23 @@ const server = http.createServer(async (req, res) => {
 
   // 14. 手动执行真实任务 (真机自动化无头执行)
   if (req.method === 'POST' && pathname.includes('/run/')) {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+
     const parts = pathname.split('/');
     const accId = parts[3];
     const taskType = parts[5];
     const acc = appConfig.accounts.find(a => a.id === accId);
     if (!acc) {
       jsonResponse(res, { error: '账号不存在' }, 404);
+      return;
+    }
+
+    if (!canUserAccessAccount(session, acc)) {
+      jsonResponse(res, { error: '权限不足：无权操作该云电脑账号' }, 403);
       return;
     }
 
@@ -1445,8 +1570,19 @@ const server = http.createServer(async (req, res) => {
 
   // 15. 获取真实商品列表
   if (req.method === 'GET' && pathname === '/api/rewards') {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+
     let dynamicRewards = null;
-    for (const acc of appConfig.accounts) {
+    let allowedAccounts = appConfig.accounts;
+    if (session.role !== 'admin') {
+      allowedAccounts = appConfig.accounts.filter(a => a.ownerId === session.userId);
+    }
+
+    for (const acc of allowedAccounts) {
       try {
         const client = getClient(acc);
         const list = await client.getRewards();
@@ -1475,12 +1611,24 @@ const server = http.createServer(async (req, res) => {
 
   // 16. 获取云电脑列表
   if (req.method === 'GET' && pathname.includes('/desktops')) {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+
     const accId = pathname.split('/')[3];
     const acc = appConfig.accounts.find(a => a.id === accId);
     if (!acc) {
       jsonResponse(res, { error: '账号不存在' }, 404);
       return;
     }
+
+    if (!canUserAccessAccount(session, acc)) {
+      jsonResponse(res, { error: '权限不足：无权查看该云电脑设备' }, 403);
+      return;
+    }
+
     const client = getClient(acc);
     try {
       const list = await client.getDesktops();
@@ -1498,18 +1646,38 @@ const server = http.createServer(async (req, res) => {
 
   // 17. 系统全局设置
   if (req.method === 'GET' && pathname === '/api/settings') {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
     jsonResponse(res, appConfig.settings || {});
     return;
   }
 
   if (req.method === 'PUT' && pathname === '/api/settings') {
     const session = getSessionFromReq(req);
-    if (session && session.role !== 'admin') {
-      jsonResponse(res, { error: '权限不足：仅管理员可修改全局系统设置' }, 403);
+    // 严格鉴权：必须是已登录且角色为 admin，访客(未登录)返回 401，非管理员返回 403
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再修改全局系统设置' }, 401);
+      return;
+    }
+    if (session.role !== 'admin') {
+      jsonResponse(res, { error: '权限不足：仅超级管理员可修改全局系统设置' }, 403);
       return;
     }
 
     const body = await parseJsonBody(req);
+    
+    // SSRF 防御校验：检查 Webhook 地址合法性
+    if (body.notify && body.notify.webhookUrl) {
+      const targetUrl = String(body.notify.webhookUrl).trim();
+      if (body.notify.enabled && !isValidWebhookUrl(targetUrl)) {
+        jsonResponse(res, { error: '安全拦截：禁止设置内网/私有IP或非法协议作为 Webhook 推送目标！' }, 400);
+        return;
+      }
+    }
+
     appConfig.settings = { ...appConfig.settings, ...body };
     saveConfig(appConfig);
     appendLog('System', '全局设置已更新，配额、保活周期与通知配置已生效', 'info');
@@ -1526,14 +1694,30 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 18. 测试通知推送 API
+  // 18. 测试通知推送 API (严格要求必须登录且为管理员，并做 SSRF 强校验)
   if (req.method === 'POST' && pathname === '/api/notify/test') {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再测试推送' }, 401);
+      return;
+    }
+    if (session.role !== 'admin') {
+      jsonResponse(res, { error: '权限不足：仅超级管理员可测试推送' }, 403);
+      return;
+    }
+
     const body = await parseJsonBody(req);
+    const testUrl = (body.webhookUrl || appConfig.settings?.notify?.webhookUrl || '').trim();
+    if (!isValidWebhookUrl(testUrl)) {
+      jsonResponse(res, { success: false, message: '安全拦截：目标 URL 为内网/本地私有地址或协议非法，已被系统拒绝！' }, 400);
+      return;
+    }
+
     const testSettings = {
       notify: {
         enabled: true,
         channel: body.channel || appConfig.settings?.notify?.channel,
-        webhookUrl: body.webhookUrl || appConfig.settings?.notify?.webhookUrl,
+        webhookUrl: testUrl,
         customTitleTemplate: body.customTitleTemplate || appConfig.settings?.notify?.customTitleTemplate,
         customContentTemplate: body.customContentTemplate || appConfig.settings?.notify?.customContentTemplate
       }
