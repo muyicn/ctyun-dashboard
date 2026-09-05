@@ -253,13 +253,68 @@ async function sendNotification(settings, title, content, extraVars = {}) {
   return { success: false, message: '未配置推送目标或通道无效' };
 }
 
+// AES-256-GCM 密码强加密与安全落盘
+const MASTER_KEY_FILE = path.join(DATA_DIR, '.master.key');
+
+function getOrCreateMasterKey() {
+  if (fs.existsSync(MASTER_KEY_FILE)) {
+    try {
+      const raw = fs.readFileSync(MASTER_KEY_FILE, 'utf8').trim();
+      if (raw.length === 64) {
+        return Buffer.from(raw, 'hex');
+      }
+    } catch (e) {}
+  }
+  const newKey = crypto.randomBytes(32);
+  try {
+    fs.writeFileSync(MASTER_KEY_FILE, newKey.toString('hex'), { mode: 0o600 });
+  } catch (e) {}
+  return newKey;
+}
+
+const masterKey = getOrCreateMasterKey();
+
+function encryptPassword(plainText) {
+  if (!plainText || typeof plainText !== 'string') return '';
+  if (plainText.startsWith('ENC:')) return plainText; // 避免重复加密
+  try {
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', masterKey, iv);
+    let enc = cipher.update(plainText, 'utf8', 'hex');
+    enc += cipher.final('hex');
+    const authTag = cipher.getAuthTag().toString('hex');
+    return 'ENC:' + iv.toString('hex') + ':' + authTag + ':' + enc;
+  } catch (e) {
+    return plainText;
+  }
+}
+
+function decryptPassword(cipherText) {
+  if (!cipherText || typeof cipherText !== 'string') return '';
+  if (!cipherText.startsWith('ENC:')) return cipherText; // 兼容历史明文
+  try {
+    const parts = cipherText.split(':');
+    if (parts.length !== 4) return cipherText;
+    const iv = Buffer.from(parts[1], 'hex');
+    const authTag = Buffer.from(parts[2], 'hex');
+    const encrypted = parts[3];
+    const decipher = crypto.createDecipheriv('aes-256-gcm', masterKey, iv);
+    decipher.setAuthTag(authTag);
+    let dec = decipher.update(encrypted, 'hex', 'utf8');
+    dec += decipher.final('utf8');
+    return dec;
+  } catch (e) {
+    return cipherText;
+  }
+}
+
 function getDefaultConfig() {
   return {
     version: '1.0.0',
     settings: {
       webPort: PORT,
       keepAliveSeconds: 60,
-      allowRegistration: true, // 允许注册
+      allowRegistration: false, // 默认不开放注册，必须由管理员后台手动开启
       defaultQuota: 2,         // 普通用户默认配额 2 台
       cron: {
         signCron: '0 2 * * *',
@@ -286,9 +341,10 @@ function loadConfig() {
       if (!cfg.settings) cfg.settings = getDefaultConfig().settings;
       if (!cfg.accounts) cfg.accounts = [];
       if (!cfg.users) cfg.users = [];
-      // 默认已有账号归属 admin
+      // 默认已有账号归属 admin，并解密密码还原至内存
       cfg.accounts.forEach(a => {
         if (!a.ownerId) a.ownerId = 'u_admin';
+        if (a.password) a.password = decryptPassword(a.password);
       });
       return cfg;
     } catch (e) {
@@ -303,13 +359,26 @@ function loadConfig() {
 function saveConfig(cfg) {
   try {
     const configToSave = cfg || appConfig;
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(configToSave, null, 2), 'utf8');
+    
+    // 安全深拷贝用于加密落盘，内存中的密码仍然由各功能使用
+    const diskClone = JSON.parse(JSON.stringify(configToSave));
+    if (Array.isArray(diskClone.accounts)) {
+      for (const a of diskClone.accounts) {
+        if (a.password) {
+          a.password = encryptPassword(a.password);
+        }
+      }
+    }
+
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(diskClone, null, 2), 'utf8');
+
+    // accounts.json 同样加密保护
     const active = (configToSave.accounts || [])
       .filter(a => a.enabled !== false && a.features?.keepAlive !== false)
       .map(a => ({
         name: a.name || a.user,
         user: a.user,
-        password: a.password,
+        password: encryptPassword(a.password),
         deviceCode: a.deviceCode
       }));
     const ctyunJson = {
@@ -1043,6 +1112,25 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 管理员修改自身用户名
+  if (req.method === 'POST' && pathname === '/api/auth/change-username') {
+    const session = getSessionFromReq(req);
+    if (!session || session.role !== 'admin') {
+      jsonResponse(res, { error: '权限不足：仅管理员可修改用户名' }, 403);
+      return;
+    }
+    const body = await parseJsonBody(req);
+    const newUsername = (body.newUsername || '').trim();
+    const updateRes = authManager.updateAdminUsername(session.username, newUsername);
+    if (updateRes.success) {
+      appendLog('Auth', `管理员用户名已从 [${session.username}] 修改为 [${newUsername}]`, 'warning');
+      jsonResponse(res, updateRes);
+    } else {
+      jsonResponse(res, updateRes, 400);
+    }
+    return;
+  }
+
   if (req.method === 'GET' && pathname === '/api/auth/me') {
     const session = getSessionFromReq(req);
     if (session) {
@@ -1062,7 +1150,7 @@ const server = http.createServer(async (req, res) => {
       // 默认提供全局未登录或 admin 访客视图
       jsonResponse(res, {
         isLoggedIn: false,
-        allowRegistration: appConfig.settings?.allowRegistration !== false,
+        allowRegistration: appConfig.settings?.allowRegistration === true,
         defaultQuota: appConfig.settings?.defaultQuota || 2
       });
     }
@@ -1681,6 +1769,12 @@ const server = http.createServer(async (req, res) => {
     appConfig.settings = { ...appConfig.settings, ...body };
     saveConfig(appConfig);
     appendLog('System', '全局设置已更新，配额、保活周期与通知配置已生效', 'info');
+
+    // 联动热更新：更新正在运行中所有云电脑客户端的保活重连周期
+    const newKeepSeconds = appConfig.settings.keepAliveSeconds || 60;
+    for (const [id, client] of clientInstances.entries()) {
+      client.metrics.keepAliveSeconds = newKeepSeconds;
+    }
 
     if (appConfig.settings.notify?.enabled) {
       sendNotification(

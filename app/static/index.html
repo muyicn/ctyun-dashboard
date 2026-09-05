@@ -285,10 +285,10 @@
         <div class="form-group">
           <div style="display: flex; align-items: center; gap: 10px;">
             <label class="switch">
-              <input type="checkbox" id="set-allow-reg" checked>
+              <input type="checkbox" id="set-allow-reg">
               <span class="slider"></span>
             </label>
-            <span style="font-size: 13px;">开放新用户自行注册</span>
+            <span style="font-size: 13px;">开放新用户自行注册 (默认关闭)</span>
           </div>
         </div>
         <div class="form-group">
@@ -397,13 +397,15 @@
         </div>
         <div class="form-group">
           <label>用户名</label>
-          <input type="text" class="form-control" id="auth-username" placeholder="请输入用户名">
+          <input type="text" class="form-control" id="auth-username" placeholder="请输入用户名 (默认管理员: admin)">
         </div>
         <div class="form-group">
           <label>密码</label>
-          <input type="password" class="form-control" id="auth-password" placeholder="请输入密码">
+          <input type="password" class="form-control" id="auth-password" placeholder="请输入密码 (默认密码: admin123)">
         </div>
-        <div id="auth-tip" class="form-text"></div>
+        <div id="auth-tip" class="form-text" style="color: var(--text-muted); font-size: 12px; margin-top: 4px;">
+          出厂默认超级管理员账号: <code>admin</code>，初始密码: <code>admin123</code> (登录后可随时更改)
+        </div>
       </div>
       <div class="modal-footer">
         <button class="btn" onclick="closeModal('auth-modal')">取消</button>
@@ -412,16 +414,24 @@
     </div>
   </div>
 
-  <!-- 修改个人密码模态框 -->
+  <!-- 修改个人密码/用户名模态框 -->
   <div class="modal-backdrop hidden" id="change-pwd-modal">
     <div class="modal">
       <div class="modal-header">
-        <h3>🔒 修改个人登录密码</h3>
+        <h3>🔒 个人账号与安全设置</h3>
         <button class="modal-close" onclick="closeModal('change-pwd-modal')">&times;</button>
       </div>
       <div class="modal-body">
+        <div id="admin-change-username-group" class="hidden" style="background: var(--bg-card); padding: 12px 14px; border-radius: 8px; margin-bottom: 8px; border: 1px solid var(--border);">
+          <label style="font-weight: 700; color: #0f172a; font-size: 13px;">修改管理员用户名</label>
+          <div style="display: flex; gap: 8px; margin-top: 6px;">
+            <input type="text" class="form-control" id="new-admin-username" placeholder="输入新管理员用户名">
+            <button class="btn btn-sm btn-primary" onclick="submitChangeUsername()" style="white-space: nowrap;">保存用户名</button>
+          </div>
+        </div>
+
         <div class="form-group">
-          <label>新密码</label>
+          <label>修改密码</label>
           <input type="password" class="form-control" id="new-user-pwd" placeholder="请输入至少5位的新密码">
         </div>
         <div class="form-group">
@@ -431,7 +441,7 @@
       </div>
       <div class="modal-footer">
         <button class="btn" onclick="closeModal('change-pwd-modal')">取消</button>
-        <button class="btn btn-primary" onclick="submitChangePassword()">确认修改</button>
+        <button class="btn btn-primary" onclick="submitChangePassword()">确认修改密码</button>
       </div>
     </div>
   </div>

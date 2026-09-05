@@ -25,6 +25,19 @@ document.addEventListener("DOMContentLoaded", () => {
     loadAccounts(true);
     loadStatus();
   }, 5000);
+
+  // 监听登录弹窗中的回车键，按回车直接提交登录！
+  const authInputs = [document.getElementById("auth-username"), document.getElementById("auth-password")];
+  authInputs.forEach(el => {
+    if (el) {
+      el.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          submitAuth();
+        }
+      });
+    }
+  });
 });
 
 // 检查当前登录用户身份
@@ -37,6 +50,14 @@ async function checkCurrentUser() {
   const loggedActionsGroup = document.getElementById("logged-actions-group");
   const statsGrid = document.getElementById("main-stats-grid");
   const sectionHeader = document.getElementById("main-section-header");
+
+  // 如果本地有持久化凭据，提前恢复界面，消除刷新时 1~2 秒由于异步网络导致的“白屏返回登录界面”闪烁等待！
+  if (currentAuthToken) {
+    if (loggedActionsGroup) loggedActionsGroup.classList.remove("hidden");
+    if (statsGrid) statsGrid.classList.remove("hidden");
+    if (sectionHeader) sectionHeader.classList.remove("hidden");
+    if (logPanel) logPanel.classList.remove("hidden");
+  }
 
   try {
     const res = await authFetch("/api/auth/me");
@@ -73,10 +94,12 @@ async function checkCurrentUser() {
     }
   } catch (e) {
     infoText.innerHTML = `系统在线`;
-    if (loggedActionsGroup) loggedActionsGroup.classList.add("hidden");
-    if (statsGrid) statsGrid.classList.add("hidden");
-    if (sectionHeader) sectionHeader.classList.add("hidden");
-    if (logPanel) logPanel.classList.add("hidden");
+    if (!currentAuthToken) {
+      if (loggedActionsGroup) loggedActionsGroup.classList.add("hidden");
+      if (statsGrid) statsGrid.classList.add("hidden");
+      if (sectionHeader) sectionHeader.classList.add("hidden");
+      if (logPanel) logPanel.classList.add("hidden");
+    }
   }
 }
 
@@ -271,7 +294,7 @@ function renderAccounts() {
       <!-- 功能开关 -->
       <div class="features-box">
         <div class="feature-row">
-          <span>📡 启用云电脑保活 (60s周期长连接守护)</span>
+          <span>📡 启用云电脑保活 (${m.keepAliveSeconds || 60}s周期长连接守护)</span>
           <label class="switch">
             <input type="checkbox" ${f.keepAlive !== false ? 'checked' : ''} onchange="toggleFeature('${acc.id}', 'keepAlive', this.checked)">
             <span class="slider"></span>
@@ -712,7 +735,7 @@ async function openSettingsModal() {
 
     document.getElementById("set-keepalive-sec").value = settings.keepAliveSeconds || 60;
     if (document.getElementById("set-allow-reg")) {
-      document.getElementById("set-allow-reg").checked = settings.allowRegistration !== false;
+      document.getElementById("set-allow-reg").checked = settings.allowRegistration === true;
     }
     if (document.getElementById("set-default-quota")) {
       document.getElementById("set-default-quota").value = settings.defaultQuota || 2;
@@ -1055,7 +1078,11 @@ function switchAuthMode(mode) {
   document.getElementById("btn-auth-tab-reg").className = !isLogin ? "btn btn-sm btn-primary" : "btn btn-sm";
   document.getElementById("btn-auth-submit").innerText = isLogin ? "立即登录" : "立即注册并登录";
   const tipEle = document.getElementById("auth-tip");
-  if (tipEle) tipEle.innerText = "";
+  if (tipEle) {
+    tipEle.innerHTML = isLogin 
+      ? '出厂默认超级管理员账号: <code>admin</code>，初始密码: <code>admin123</code> (登录后可随时更改)' 
+      : '提示：新注册用户登录后拥有独立控制台，默认配额上限由管理员分配。';
+  }
 }
 
 async function submitAuth() {
@@ -1185,11 +1212,44 @@ async function deleteUserAccount(userId, username) {
   }
 }
 
-// 修改个人密码
+// 修改个人密码/修改管理员用户名
 function openChangePwdModal() {
   document.getElementById("new-user-pwd").value = "";
   document.getElementById("confirm-user-pwd").value = "";
+  const adminGroup = document.getElementById("admin-change-username-group");
+  if (adminGroup) {
+    const isAdmin = currentUser && currentUser.role === "admin";
+    adminGroup.classList.toggle("hidden", !isAdmin);
+    if (isAdmin) {
+      document.getElementById("new-admin-username").value = currentUser.username || "admin";
+    }
+  }
   openModal("change-pwd-modal");
+}
+
+async function submitChangeUsername() {
+  const newName = document.getElementById("new-admin-username").value.trim();
+  if (!newName) {
+    showToast("用户名不能为空", "error");
+    return;
+  }
+
+  try {
+    const res = await authFetch("/api/auth/change-username", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ newUsername: newName })
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast(`管理员用户名已成功修改为: ${newName}！`, "success");
+      await checkCurrentUser();
+    } else {
+      showToast(data.error || "修改失败", "error");
+    }
+  } catch (e) {
+    showToast("请求异常: " + e.message, "error");
+  }
 }
 
 async function submitChangePassword() {

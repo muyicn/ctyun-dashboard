@@ -85,6 +85,11 @@ class AuthManager {
 
   register(username, password) {
     const cfg = this.configManager.config;
+    // 默认不开放注册，必须由管理员在后台系统设置中开启
+    if (cfg.settings?.allowRegistration !== true) {
+      return { success: false, error: '管理员未开放新用户自行注册功能，请联系管理员！' };
+    }
+
     if (!cfg.users) cfg.users = [];
 
     const cleanUser = username.trim();
@@ -158,6 +163,26 @@ class AuthManager {
     user.passwordHash = hashPassword(newPassword);
     this.configManager.saveConfig();
     return true;
+  }
+
+  updateAdminUsername(oldUsername, newUsername) {
+    const cfg = this.configManager.config;
+    const cleanNew = (newUsername || '').trim();
+    if (!cleanNew) return { success: false, error: '新管理员用户名不能为空' };
+    if (cfg.users.some(u => u.username === cleanNew && u.username !== oldUsername)) {
+      return { success: false, error: '该用户名已被其他账号占用' };
+    }
+
+    const admin = (cfg.users || []).find(u => u.username === oldUsername && u.role === 'admin');
+    if (!admin) return { success: false, error: '管理员账号不存在' };
+
+    admin.username = cleanNew;
+    // 同步更新当前会话里的 username
+    for (const [token, s] of this.sessions.entries()) {
+      if (s.userId === admin.id) s.username = cleanNew;
+    }
+    this.configManager.saveConfig();
+    return { success: true, newUsername: cleanNew };
   }
 
   deleteUser(userId) {
