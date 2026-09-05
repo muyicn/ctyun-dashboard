@@ -164,6 +164,8 @@ function closeModal(id) {
 }
 
 // 1. 加载系统统计
+let cachedPointsDetails = [];
+
 async function loadStatus() {
   try {
     const res = await authFetch("/api/status");
@@ -172,9 +174,55 @@ async function loadStatus() {
     document.getElementById("stat-online").innerText = data.onlineKeepAlive || 0;
     document.getElementById("stat-signed").innerText = data.signedToday || 0;
     document.getElementById("stat-points").innerText = data.totalEarnedPoints || 0;
+    cachedPointsDetails = data.pointsDetails || [];
   } catch (e) {
     console.error("加载状态异常:", e);
   }
+}
+
+// 打开每日已获得积分详细明细模态框
+function openPointsDetailModal() {
+  const sumEl = document.getElementById("modal-points-sum");
+  const listEl = document.getElementById("points-detail-list");
+  const totalEarned = document.getElementById("stat-points").innerText || "0";
+  sumEl.innerText = totalEarned;
+  listEl.innerHTML = "";
+
+  if (!cachedPointsDetails || cachedPointsDetails.length === 0) {
+    listEl.innerHTML = `<div style="text-align:center; padding:20px; color:var(--text-muted); font-size:13px;">暂无云电脑今日积分明细</div>`;
+    openModal("points-detail-modal");
+    return;
+  }
+
+  cachedPointsDetails.forEach(acc => {
+    const item = document.createElement("div");
+    item.style.cssText = "background:#ffffff; border:1px solid var(--border); border-radius:8px; padding:14px; box-shadow:0 1px 3px rgba(0,0,0,0.02);";
+
+    let taskRows = (acc.tasks || []).map(t => {
+      const isDone = t.points > 0;
+      return `
+        <div style="display:flex; justify-content:space-between; font-size:12.5px; padding:4px 0; border-bottom:1px dashed #f1f5f9;">
+          <span style="color:#334155;">${escapeHtml(t.name)}</span>
+          <span style="font-weight:700; color:${isDone ? '#16a34a' : '#d97706'};">
+            ${isDone ? `+${t.points} 积分 (已完成)` : `未完成 (${t.progress || '0/1'})`}
+          </span>
+        </div>
+      `;
+    }).join("");
+
+    item.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <span style="font-size:14px; font-weight:700; color:#0f172a;">🖥️ ${escapeHtml(acc.accountName)}</span>
+        <span style="font-size:13px; color:#16a34a; font-weight:700;">今日获得: +${acc.todayPoints}分 (总积分: ${acc.totalPoints})</span>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:4px;">
+        ${taskRows}
+      </div>
+    `;
+    listEl.appendChild(item);
+  });
+
+  openModal("points-detail-modal");
 }
 
 // 2. 加载多账号列表

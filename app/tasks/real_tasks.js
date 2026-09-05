@@ -108,13 +108,11 @@ async function executeRealHang(user, password, ocrEngine, durationSeconds = 90, 
   const scalePercent = parseInt(displayConfig.scale) || 150;
   const deviceScaleFactor = (scalePercent / 100) || 1.5;
 
-  // 核心公式：浏览器逻辑视口尺寸 = 目标物理分辨率 / DPI 缩放比
-  // 例如 2560 / 1.5 = 1707，1440 / 1.5 = 960
-  // 天翼云 Agent 计算渲染像素时：1707 * 1.5 = 2560.5，960 * 1.5 = 1440，精准锁定 2560x1440 且系统 DPI 真正等于 150% (1.5)！
-  const logicWidth = Math.round(width / deviceScaleFactor);
-  const logicHeight = Math.round(height / deviceScaleFactor);
-
-  onLog('Hang', `启动云电脑挂机引擎 (${browserPath.split('\\').pop() || 'chromium'}) [设定物理分辨率: ${width}x${height}, DPI缩放: ${scalePercent}%, 逻辑视口: ${logicWidth}x${logicHeight}]...`, 'info');
+  // 核心公式修正：
+  // 必须直接使用设定的精确物理分辨率 2560x1440 作为窗口尺寸与视口尺寸！
+  // 天翼云 Agent 在网页全屏与画布绑定时，直接按 clientWidth / clientHeight / innerHeight 采集虚拟显示器高度
+  // 如果逻辑尺寸缩小为 960，Agent 采集后就会换算为 1438；只有直接设定为精准 2560x1440 且绑定 deviceScaleFactor，Agent 读取物理分辨率才会 100% 绝对等于 2560x1440！
+  onLog('Hang', `启动云电脑挂机引擎 (${browserPath.split('\\').pop() || 'chromium'}) [锁定精准物理分辨率: ${width}x${height}, DPI缩放: ${scalePercent}%]...`, 'info');
 
   const browser = await puppeteer.launch({
     executablePath: browserPath,
@@ -123,7 +121,7 @@ async function executeRealHang(user, password, ocrEngine, durationSeconds = 90, 
       '--no-sandbox',
       '--disable-gpu',
       '--disable-dev-shm-usage',
-      `--window-size=${logicWidth},${logicHeight}`,
+      `--window-size=${width},${height}`,
       `--force-device-scale-factor=${deviceScaleFactor}`,
       '--high-dpi-support=1'
     ],
@@ -133,17 +131,17 @@ async function executeRealHang(user, password, ocrEngine, durationSeconds = 90, 
   try {
     const page = await browser.newPage();
     
-    // 通过 Chrome DevTools Protocol (CDP) 强制覆写底层设备指标与物理 DPI 像素比
+    // 通过 Chrome DevTools Protocol (CDP) 精确覆写物理像素与设备像素比
     const cdp = await page.target().createCDPSession();
     await cdp.send('Emulation.setDeviceMetricsOverride', {
-      width: logicWidth,
-      height: logicHeight,
+      width: width,
+      height: height,
       deviceScaleFactor: deviceScaleFactor,
       mobile: false,
       screenOrientation: { angle: 0, type: 'landscapePrimary' }
     });
 
-    await page.evaluateOnNewDocument((w, h, sf, lw, lh) => {
+    await page.evaluateOnNewDocument((w, h, sf) => {
       try {
         const proto = Object.getPrototypeOf(window.screen);
         Object.defineProperty(proto, 'width', { get: () => w });
@@ -151,10 +149,10 @@ async function executeRealHang(user, password, ocrEngine, durationSeconds = 90, 
         Object.defineProperty(proto, 'availWidth', { get: () => w });
         Object.defineProperty(proto, 'availHeight', { get: () => h });
         Object.defineProperty(window, 'devicePixelRatio', { get: () => sf });
-        Object.defineProperty(window, 'innerWidth', { get: () => lw });
-        Object.defineProperty(window, 'innerHeight', { get: () => lh });
+        Object.defineProperty(window, 'innerWidth', { get: () => w });
+        Object.defineProperty(window, 'innerHeight', { get: () => h });
       } catch (e) {}
-    }, width, height, deviceScaleFactor, logicWidth, logicHeight);
+    }, width, height, deviceScaleFactor);
 
     const loginUrl = 'https://pc.ctyun.cn/#/login';
 

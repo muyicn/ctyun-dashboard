@@ -75,11 +75,11 @@
           <div class="stat-label">今日已签到</div>
         </div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card" style="cursor: pointer;" onclick="openPointsDetailModal()" title="点击查看各云电脑今日积分明细">
         <div class="stat-icon">🎁</div>
         <div class="stat-info">
-          <div class="stat-value" id="stat-points">0</div>
-          <div class="stat-label">每日已获得积分</div>
+          <div class="stat-value" id="stat-points" style="color: #16a34a;">0</div>
+          <div class="stat-label">每日已获得积分 (查看明细 ↗)</div>
         </div>
       </div>
     </div>
@@ -257,6 +257,28 @@
       <div class="modal-footer">
         <button class="btn" onclick="closeModal('redeem-modal')">取消</button>
         <button class="btn btn-primary" onclick="saveRedeemConfig()">保存兑换设置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 每日已获得积分明细模态框 -->
+  <div class="modal-backdrop hidden" id="points-detail-modal">
+    <div class="modal" style="max-width: 620px;">
+      <div class="modal-header">
+        <h3>📊 每日已获得积分详细明细</h3>
+        <button class="modal-close" onclick="closeModal('points-detail-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(22,163,74,0.08); padding: 12px 18px; border-radius: 8px; border: 1px solid rgba(22,163,74,0.2);">
+          <span style="font-size: 13.5px; color: #1e293b;">今日名下所有云电脑已获总积分:</span>
+          <span style="font-size: 20px; font-weight: 700; color: #16a34a;"><b id="modal-points-sum">0</b> 分</span>
+        </div>
+        <div id="points-detail-list" style="display: flex; flex-direction: column; gap: 12px; margin-top: 6px;">
+          <!-- 动态加载各云电脑今日明细 -->
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('points-detail-modal')">关闭</button>
       </div>
     </div>
   </div>

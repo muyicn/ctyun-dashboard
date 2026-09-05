@@ -1308,18 +1308,42 @@ const server = http.createServer(async (req, res) => {
     const online = visibleAccounts.filter(a => a.stats?.keepAliveStatus === 'online').length;
     const today = getBeijingDateOnly();
     const signed = visibleAccounts.filter(a => a.stats?.lastSignTime && a.stats.lastSignTime.startsWith(today)).length;
-    // 汇总该用户可见账号的今日已获得总积分
-    const totalPointsSum = visibleAccounts.reduce((sum, a) => {
+    // 汇总该用户可见账号的今日已获得总积分 (按今日任务实际完成积分累加，上限每个账号 300 积分)
+    let totalTodayEarned = 0;
+    const pointsDetails = [];
+
+    for (const a of visibleAccounts) {
       const client = clientInstances.get(a.id);
-      const curPts = (client && client.metrics.userPoints) ? client.metrics.userPoints : (a.stats?.points || 0);
-      return sum + curPts;
-    }, 0);
+      const tasks = client?.metrics?.officialTasks || [];
+      let accTodayPoints = 0;
+      const completedTasks = [];
+
+      for (const t of tasks) {
+        if (t.status === 2 || (t.total > 0 && t.current >= t.total)) {
+          const val = t.points || 100;
+          accTodayPoints += val;
+          completedTasks.push({ name: t.name, points: val });
+        } else {
+          completedTasks.push({ name: t.name, points: 0, progress: `${t.current}/${t.total}` });
+        }
+      }
+
+      totalTodayEarned += accTodayPoints;
+      pointsDetails.push({
+        accountId: a.id,
+        accountName: a.name || a.user,
+        todayPoints: accTodayPoints,
+        totalPoints: (client && client.metrics.userPoints) ? client.metrics.userPoints : (a.stats?.points || 0),
+        tasks: completedTasks
+      });
+    }
 
     jsonResponse(res, {
       accountsTotal: total,
       onlineKeepAlive: online,
       signedToday: signed,
-      totalEarnedPoints: totalPointsSum,
+      totalEarnedPoints: totalTodayEarned,
+      pointsDetails: pointsDetails,
       currentTime: getBeijingTimeString(),
       isGuest: false
     });
