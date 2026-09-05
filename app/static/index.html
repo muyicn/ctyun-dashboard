@@ -21,22 +21,29 @@
         <!-- 未登录时仅显示登录/注册按钮 -->
         <button class="btn btn-primary" id="btn-auth-action" onclick="openAuthModal()">🔑 立即登录</button>
 
-        <!-- 登录后呈现的精简导航区：仅保留「➕ 添加云电脑」、「🔄 重启保活」以及「头像下拉框」 -->
+        <!-- 登录后呈现的精简导航区：仅保留「➕ 添加云电脑」、「⚙️ 系统设置下拉」以及「头像下拉框」 -->
         <div id="logged-actions-group" class="hidden" style="display: flex; align-items: center; gap: 10px;">
           <button class="btn btn-primary" onclick="openAddAccountModal()">➕ 添加云电脑</button>
-          <button class="btn btn-warning" onclick="restartKeeper()">🔄 重启保活</button>
 
-          <!-- 用户头像与收拢下拉菜单 -->
+          <!-- 系统设置下拉菜单栏 -->
+          <div class="user-dropdown" id="settings-dropdown-container">
+            <button class="btn" onclick="toggleSettingsMenu()">⚙️ 系统设置 ▾</button>
+            <div class="dropdown-menu hidden" id="settings-dropdown-menu">
+              <button class="dropdown-item" onclick="openSettingsModal(); hideSettingsMenu();">⚙️ 系统与定时调度</button>
+              <button class="dropdown-item" onclick="restartKeeper(); hideSettingsMenu();">🔄 重启保活</button>
+              <button class="dropdown-item" onclick="openBackupModal(); hideSettingsMenu();">📦 备份与还原 (JSON)</button>
+            </div>
+          </div>
+
+          <!-- 用户头像与收拢下拉菜单 (只保留修改密码/用户名、用户与配额管理及退出登录) -->
           <div class="user-dropdown" id="user-dropdown-container">
-            <div class="avatar-btn" id="header-avatar" onclick="toggleUserMenu()" title="个人中心与功能菜单">U</div>
+            <div class="avatar-btn" id="header-avatar" onclick="toggleUserMenu()" title="个人中心">U</div>
             <div class="dropdown-menu hidden" id="user-dropdown-menu">
               <div style="padding: 8px 16px; font-size: 12px; color: var(--text-muted); border-bottom: 1px solid var(--border);">
                 登录身份: <span id="dropdown-username" style="font-weight: 700; color: #0f172a;">admin</span>
               </div>
               <button class="dropdown-item" onclick="openChangePwdModal(); hideUserMenu();">🔒 修改密码/用户名</button>
               <button class="dropdown-item hidden" id="menu-admin-users" onclick="openAdminUsersModal(); hideUserMenu();">👥 用户与配额管理</button>
-              <button class="dropdown-item" onclick="openBackupModal(); hideUserMenu();">📦 备份与还原 (JSON)</button>
-              <button class="dropdown-item" onclick="openSettingsModal(); hideUserMenu();">⚙️ 系统全局设置</button>
               <div class="dropdown-divider"></div>
               <button class="dropdown-item" onclick="logoutUser(); hideUserMenu();" style="color: var(--danger);">🚪 退出登录</button>
             </div>

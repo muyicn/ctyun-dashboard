@@ -44,6 +44,7 @@ document.addEventListener("DOMContentLoaded", () => {
 function toggleUserMenu() {
   const menu = document.getElementById("user-dropdown-menu");
   if (menu) menu.classList.toggle("hidden");
+  hideSettingsMenu();
 }
 
 function hideUserMenu() {
@@ -51,11 +52,27 @@ function hideUserMenu() {
   if (menu) menu.classList.add("hidden");
 }
 
-// 点击页面其他区域自动收起头像下拉菜单
+// 系统设置下拉菜单控制
+function toggleSettingsMenu() {
+  const menu = document.getElementById("settings-dropdown-menu");
+  if (menu) menu.classList.toggle("hidden");
+  hideUserMenu();
+}
+
+function hideSettingsMenu() {
+  const menu = document.getElementById("settings-dropdown-menu");
+  if (menu) menu.classList.add("hidden");
+}
+
+// 点击页面其他区域自动收起所有下拉菜单
 document.addEventListener("click", (e) => {
-  const container = document.getElementById("user-dropdown-container");
-  if (container && !container.contains(e.target)) {
+  const userContainer = document.getElementById("user-dropdown-container");
+  if (userContainer && !userContainer.contains(e.target)) {
     hideUserMenu();
+  }
+  const settingsContainer = document.getElementById("settings-dropdown-container");
+  if (settingsContainer && !settingsContainer.contains(e.target)) {
+    hideSettingsMenu();
   }
 });
 

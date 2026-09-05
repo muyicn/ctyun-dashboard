@@ -773,11 +773,11 @@ class CtYunClient {
 
   async runCycleLoop() {
     const accName = this.account.name || this.account.user;
-    const keepSeconds = appConfig.settings?.keepAliveSeconds || 60;
-    this.metrics.keepAliveSeconds = keepSeconds;
 
     while (this.workerRunning) {
       try {
+        const keepSeconds = appConfig.settings?.keepAliveSeconds || 60;
+        this.metrics.keepAliveSeconds = keepSeconds;
         appendLog('Heartbeat', `[${accName}] === 新保活周期开始 (设定保持: ${keepSeconds}秒) ===`, 'info');
         
         const desktops = await this.getDesktops();
@@ -818,6 +818,17 @@ class CtYunClient {
             }
             this.wsAlive = false;
             resolveSession();
+          };
+
+          this.resetCycleTimeout = (newSeconds) => {
+            if (cycleDone) return;
+            if (sessionTimeout) clearTimeout(sessionTimeout);
+            this.metrics.keepAliveSeconds = newSeconds;
+            this.metrics.cycleCountdown = newSeconds;
+            sessionTimeout = setTimeout(() => {
+              appendLog('Heartbeat', `[${accName}][${this.metrics.desktopName}] 周期时间到 (${newSeconds}s)，强制重连刷新天翼云会话...`, 'info');
+              endSession('Timeout Reset');
+            }, newSeconds * 1000);
           };
 
           sessionTimeout = setTimeout(() => {
@@ -1962,10 +1973,15 @@ const server = http.createServer(async (req, res) => {
     saveConfig(appConfig);
     appendLog('System', '全局设置已更新，配额、保活周期与通知配置已生效', 'info');
 
-    // 联动热更新：更新正在运行中所有云电脑客户端的保活重连周期
+    // 联动热更新：更新正在运行中所有云电脑客户端的保活重连周期并即时重设倒计时
     const newKeepSeconds = appConfig.settings.keepAliveSeconds || 60;
     for (const [id, client] of clientInstances.entries()) {
-      client.metrics.keepAliveSeconds = newKeepSeconds;
+      if (client.resetCycleTimeout) {
+        client.resetCycleTimeout(newKeepSeconds);
+      } else {
+        client.metrics.keepAliveSeconds = newKeepSeconds;
+        client.metrics.cycleCountdown = newKeepSeconds;
+      }
     }
 
     if (appConfig.settings.notify?.enabled) {
