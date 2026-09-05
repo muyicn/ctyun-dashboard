@@ -18,19 +18,29 @@
         </div>
       </div>
       <div class="header-actions">
-        <!-- 多用户登录与操作状态 (未登录时仅显示登录/注册，登录后呈现全部管理功能) -->
-        <div id="user-status-bar" style="display: flex; align-items: center; gap: 8px; margin-right: 4px;">
-          <span id="user-info-text" style="font-size: 13px; color: var(--text-muted);">正在加载身份...</span>
-          <button class="btn btn-sm hidden" id="btn-change-pwd" onclick="openChangePwdModal()">🔒 修改密码</button>
-          <button class="btn btn-sm hidden" id="btn-admin-users" onclick="openAdminUsersModal()">👥 用户管理</button>
-          <button class="btn btn-sm" id="btn-auth-action" onclick="openAuthModal()">登录/注册</button>
-        </div>
-        <!-- 登录后才可见的操作按钮组 -->
-        <div id="logged-actions-group" class="hidden" style="display: flex; gap: 8px;">
-          <button class="btn btn-primary" onclick="openAddAccountModal()">➕ 添加账号</button>
-          <button class="btn" onclick="openBackupModal()">📦 备份/还原</button>
-          <button class="btn" onclick="openSettingsModal()">⚙️ 系统设置</button>
+        <!-- 未登录时仅显示登录/注册按钮 -->
+        <button class="btn btn-primary" id="btn-auth-action" onclick="openAuthModal()">🔑 立即登录</button>
+
+        <!-- 登录后呈现的精简导航区：仅保留「➕ 添加云电脑」、「🔄 重启保活」以及「头像下拉框」 -->
+        <div id="logged-actions-group" class="hidden" style="display: flex; align-items: center; gap: 10px;">
+          <button class="btn btn-primary" onclick="openAddAccountModal()">➕ 添加云电脑</button>
           <button class="btn btn-warning" onclick="restartKeeper()">🔄 重启保活</button>
+
+          <!-- 用户头像与收拢下拉菜单 -->
+          <div class="user-dropdown" id="user-dropdown-container">
+            <div class="avatar-btn" id="header-avatar" onclick="toggleUserMenu()" title="个人中心与功能菜单">U</div>
+            <div class="dropdown-menu hidden" id="user-dropdown-menu">
+              <div style="padding: 8px 16px; font-size: 12px; color: var(--text-muted); border-bottom: 1px solid var(--border);">
+                登录身份: <span id="dropdown-username" style="font-weight: 700; color: #0f172a;">admin</span>
+              </div>
+              <button class="dropdown-item" onclick="openChangePwdModal(); hideUserMenu();">🔒 修改密码/用户名</button>
+              <button class="dropdown-item hidden" id="menu-admin-users" onclick="openAdminUsersModal(); hideUserMenu();">👥 用户与配额管理</button>
+              <button class="dropdown-item" onclick="openBackupModal(); hideUserMenu();">📦 备份与还原 (JSON)</button>
+              <button class="dropdown-item" onclick="openSettingsModal(); hideUserMenu();">⚙️ 系统全局设置</button>
+              <div class="dropdown-divider"></div>
+              <button class="dropdown-item" onclick="logoutUser(); hideUserMenu();" style="color: var(--danger);">🚪 退出登录</button>
+            </div>
+          </div>
         </div>
       </div>
     </header>
@@ -244,6 +254,48 @@
     </div>
   </div>
 
+  <!-- 手动积分兑换与抽奖模态框 -->
+  <div class="modal-backdrop hidden" id="manual-redeem-modal">
+    <div class="modal" style="max-width: 540px;">
+      <div class="modal-header">
+        <h3>🎁 手动积分兑换 / 幸运抽奖</h3>
+        <button class="modal-close" onclick="closeModal('manual-redeem-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="manual-acc-id">
+        <div style="background: rgba(37,99,235,0.06); padding: 12px 16px; border-radius: 8px; border: 1px solid rgba(37,99,235,0.2); display: flex; justify-content: space-between; align-items: center;">
+          <span style="font-size: 13px; color: #1e293b;">目标云电脑: <b id="manual-acc-name">--</b></span>
+          <span style="font-size: 13px; color: #16a34a; font-weight: 700;">可用积分: <b id="manual-user-points" style="font-size: 16px;">0</b></span>
+        </div>
+
+        <div class="form-group">
+          <label>选择兑换商品 / 抽奖奖品</label>
+          <select class="form-control" id="manual-prod-select" onchange="onManualProductChange()">
+            <!-- 动态填充 -->
+          </select>
+          <div class="form-text" id="manual-prod-desc" style="color: var(--accent);"></div>
+        </div>
+
+        <div class="form-group" id="group-manual-desktop">
+          <label>绑定目标云电脑 (升配/扩容类商品生效设备)</label>
+          <select class="form-control" id="manual-desktop-select">
+            <option value="0">主云电脑 (默认)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>兑换数量 / 抽奖次数</label>
+          <input type="number" class="form-control" id="manual-order-times" value="1" min="1" max="100" oninput="updateManualTotalCost()">
+          <div class="form-text" id="manual-cost-tip" style="font-weight: 600; color: #d97706; margin-top: 4px;">预计消耗: 500 积分</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('manual-redeem-modal')">取消</button>
+        <button class="btn btn-primary" id="btn-manual-order-submit" onclick="submitManualRedeemOrder()">立即确认兑换</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 系统设置模态框 -->
   <div class="modal-backdrop hidden" id="settings-modal">
     <div class="modal">
@@ -397,15 +449,13 @@
         </div>
         <div class="form-group">
           <label>用户名</label>
-          <input type="text" class="form-control" id="auth-username" placeholder="请输入用户名 (默认管理员: admin)">
+          <input type="text" class="form-control" id="auth-username" placeholder="请输入用户名">
         </div>
         <div class="form-group">
           <label>密码</label>
-          <input type="password" class="form-control" id="auth-password" placeholder="请输入密码 (默认密码: admin123)">
+          <input type="password" class="form-control" id="auth-password" placeholder="请输入密码">
         </div>
-        <div id="auth-tip" class="form-text" style="color: var(--text-muted); font-size: 12px; margin-top: 4px;">
-          出厂默认超级管理员账号: <code>admin</code>，初始密码: <code>admin123</code> (登录后可随时更改)
-        </div>
+        <div id="auth-tip" class="form-text" style="display: none;"></div>
       </div>
       <div class="modal-footer">
         <button class="btn" onclick="closeModal('auth-modal')">取消</button>

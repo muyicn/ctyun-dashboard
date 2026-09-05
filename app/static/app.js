@@ -40,19 +40,39 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 });
 
+// 头像下拉菜单控制
+function toggleUserMenu() {
+  const menu = document.getElementById("user-dropdown-menu");
+  if (menu) menu.classList.toggle("hidden");
+}
+
+function hideUserMenu() {
+  const menu = document.getElementById("user-dropdown-menu");
+  if (menu) menu.classList.add("hidden");
+}
+
+// 点击页面其他区域自动收起头像下拉菜单
+document.addEventListener("click", (e) => {
+  const container = document.getElementById("user-dropdown-container");
+  if (container && !container.contains(e.target)) {
+    hideUserMenu();
+  }
+});
+
 // 检查当前登录用户身份
 async function checkCurrentUser() {
-  const infoText = document.getElementById("user-info-text");
-  const adminBtn = document.getElementById("btn-admin-users");
-  const changePwdBtn = document.getElementById("btn-change-pwd");
   const authBtn = document.getElementById("btn-auth-action");
   const logPanel = document.getElementById("main-log-panel");
   const loggedActionsGroup = document.getElementById("logged-actions-group");
   const statsGrid = document.getElementById("main-stats-grid");
   const sectionHeader = document.getElementById("main-section-header");
+  const headerAvatar = document.getElementById("header-avatar");
+  const dropdownUsername = document.getElementById("dropdown-username");
+  const menuAdminUsers = document.getElementById("menu-admin-users");
 
   // 如果本地有持久化凭据，提前恢复界面，消除刷新时 1~2 秒由于异步网络导致的“白屏返回登录界面”闪烁等待！
   if (currentAuthToken) {
+    if (authBtn) authBtn.classList.add("hidden");
     if (loggedActionsGroup) loggedActionsGroup.classList.remove("hidden");
     if (statsGrid) statsGrid.classList.remove("hidden");
     if (sectionHeader) sectionHeader.classList.remove("hidden");
@@ -66,13 +86,15 @@ async function checkCurrentUser() {
     if (data.isLoggedIn && data.user) {
       currentUser = data.user;
       const isAdmin = currentUser.role === "admin";
-      infoText.innerHTML = `${isAdmin ? '👑 <b>管理员:</b> ' : '👤 <b>用户:</b> '}${escapeHtml(currentUser.username)}`;
-      adminBtn.classList.toggle("hidden", !isAdmin);
-      if (changePwdBtn) changePwdBtn.classList.remove("hidden");
-      authBtn.innerText = "退出登录";
-      authBtn.onclick = logoutUser;
       
-      // 登录后展现全部业务区
+      // 更新头像首字母和下拉菜单用户名
+      const initial = (currentUser.username || "A")[0].toUpperCase();
+      if (headerAvatar) headerAvatar.innerText = initial;
+      if (dropdownUsername) dropdownUsername.innerText = `${currentUser.username} (${isAdmin ? '管理员' : '普通用户'})`;
+      if (menuAdminUsers) menuAdminUsers.classList.toggle("hidden", !isAdmin);
+
+      // 未登录按钮隐藏，已登录整组展开
+      if (authBtn) authBtn.classList.add("hidden");
       if (loggedActionsGroup) loggedActionsGroup.classList.remove("hidden");
       if (statsGrid) statsGrid.classList.remove("hidden");
       if (sectionHeader) sectionHeader.classList.remove("hidden");
@@ -80,21 +102,21 @@ async function checkCurrentUser() {
       initLogStream();
     } else {
       currentUser = null;
-      infoText.innerHTML = `未登录 (访客模式)`;
-      adminBtn.classList.add("hidden");
-      if (changePwdBtn) changePwdBtn.classList.add("hidden");
-      authBtn.innerText = "登录/注册";
-      authBtn.onclick = openAuthModal;
+      if (authBtn) {
+        authBtn.classList.remove("hidden");
+        authBtn.innerText = "🔑 立即登录";
+        authBtn.onclick = openAuthModal;
+      }
       
-      // 未登录时隐藏所有业务区与控制台
+      // 未登录时隐藏所有业务区、控制台与已登录菜单
       if (loggedActionsGroup) loggedActionsGroup.classList.add("hidden");
       if (statsGrid) statsGrid.classList.add("hidden");
       if (sectionHeader) sectionHeader.classList.add("hidden");
       if (logPanel) logPanel.classList.add("hidden");
     }
   } catch (e) {
-    infoText.innerHTML = `系统在线`;
     if (!currentAuthToken) {
+      if (authBtn) authBtn.classList.remove("hidden");
       if (loggedActionsGroup) loggedActionsGroup.classList.add("hidden");
       if (statsGrid) statsGrid.classList.add("hidden");
       if (sectionHeader) sectionHeader.classList.add("hidden");
@@ -332,6 +354,7 @@ function renderAccounts() {
         <button class="btn btn-sm btn-success" onclick="triggerTask('${acc.id}', 'sign')">立即打卡</button>
         <button class="btn btn-sm btn-primary" onclick="triggerTask('${acc.id}', 'aiChat')">立即AI对话</button>
         <button class="btn btn-sm" onclick="triggerTask('${acc.id}', 'hang')">立即挂机同步</button>
+        <button class="btn btn-sm btn-warning" onclick="openManualRedeemModal('${acc.id}')" title="根据当前积分手动兑换商品或抽奖">🎁 手动兑换</button>
         <button class="btn btn-sm" onclick="openDisplayModal('${acc.id}')" title="设置云电脑分辨率与缩放比">🖥️ 分辨率: ${acc.displayConfig?.width || 2560}*${acc.displayConfig?.height || 1440} (${acc.displayConfig?.scale || 150}%)</button>
         ${!acc.bound ? `<button class="btn btn-sm btn-warning" onclick="openSmsModal('${acc.id}')">📲 短信绑定</button>` : ''}
       </div>
@@ -685,6 +708,148 @@ async function saveRedeemConfig() {
     }
   } catch (e) {
     showToast("请求异常: " + e.message, "error");
+  }
+}
+
+// ==========================================
+// 手动积分兑换 / 幸运抽奖
+// ==========================================
+async function openManualRedeemModal(accId) {
+  const acc = accounts.find(a => a.id === accId);
+  if (!acc) return;
+  document.getElementById("manual-acc-id").value = acc.id;
+  document.getElementById("manual-acc-name").innerText = acc.name || acc.user;
+  const pts = acc.liveMetrics?.userPoints || acc.stats?.points || 0;
+  document.getElementById("manual-user-points").innerText = pts;
+  document.getElementById("manual-order-times").value = 1;
+
+  await loadManualProductList();
+  await loadManualDesktops(accId);
+  updateManualTotalCost();
+
+  openModal("manual-redeem-modal");
+}
+
+async function loadManualProductList() {
+  const select = document.getElementById("manual-prod-select");
+  select.innerHTML = "<option value=''>加载天翼云商城最新商品...</option>";
+
+  try {
+    if (!availableRewards || availableRewards.length === 0) {
+      const res = await authFetch("/api/rewards");
+      availableRewards = await res.json();
+    }
+
+    select.innerHTML = "";
+    availableRewards.forEach(r => {
+      const opt = document.createElement("option");
+      opt.value = r.prodId;
+      opt.innerText = `${r.prodName} (${r.costPoints} 积分)`;
+      opt.dataset.name = r.prodName;
+      opt.dataset.points = r.costPoints;
+      opt.dataset.type = r.prodType;
+      opt.dataset.desc = r.description || "";
+      select.appendChild(opt);
+    });
+    onManualProductChange();
+  } catch (e) {
+    select.innerHTML = "<option value='17023101' data-name='8C16G升配包1天' data-points='500' data-type='pointstplupgrade' data-desc='升级云电脑配置'>8C16G升配包1天 (500 积分)</option>";
+    onManualProductChange();
+  }
+}
+
+function onManualProductChange() {
+  const select = document.getElementById("manual-prod-select");
+  const selectedOpt = select.options[select.selectedIndex];
+  if (selectedOpt) {
+    document.getElementById("manual-prod-desc").innerText = selectedOpt.dataset.desc || "";
+  }
+  updateManualTotalCost();
+}
+
+async function loadManualDesktops(accId) {
+  const select = document.getElementById("manual-desktop-select");
+  select.innerHTML = "<option value='0'>正在获取云电脑设备...</option>";
+
+  try {
+    const res = await authFetch(`/api/accounts/${accId}/desktops`);
+    if (res.ok) {
+      const list = await res.json();
+      if (list.length > 0) {
+        select.innerHTML = "";
+        list.forEach(d => {
+          const opt = document.createElement("option");
+          opt.value = d.desktopId;
+          opt.innerText = `${d.desktopName || d.desktopCode} (${d.useStatusText || '运行中'})`;
+          select.appendChild(opt);
+        });
+        return;
+      }
+    }
+  } catch (e) {}
+
+  select.innerHTML = "<option value='0'>主云电脑 (默认)</option>";
+}
+
+function updateManualTotalCost() {
+  const select = document.getElementById("manual-prod-select");
+  const selectedOpt = select.options[select.selectedIndex];
+  const unitCost = selectedOpt ? (parseInt(selectedOpt.dataset.points) || 0) : 0;
+  const times = Math.max(1, parseInt(document.getElementById("manual-order-times").value) || 1);
+  const total = unitCost * times;
+  document.getElementById("manual-cost-tip").innerText = `单价: ${unitCost}分 | 数量: ${times} | 预计消耗: ${total} 积分`;
+}
+
+async function submitManualRedeemOrder() {
+  const accId = document.getElementById("manual-acc-id").value;
+  const select = document.getElementById("manual-prod-select");
+  const selectedOpt = select.options[select.selectedIndex];
+  if (!selectedOpt) {
+    showToast("请选择要兑换的商品", "error");
+    return;
+  }
+
+  const prodId = parseInt(selectedOpt.value);
+  const prodName = selectedOpt.dataset.name;
+  const prodType = selectedOpt.dataset.type;
+  const costPoints = parseInt(selectedOpt.dataset.points) || 0;
+  const desktopId = parseInt(document.getElementById("manual-desktop-select").value) || 0;
+  const times = Math.max(1, parseInt(document.getElementById("manual-order-times").value) || 1);
+  const totalCost = costPoints * times;
+
+  const currentPts = parseInt(document.getElementById("manual-user-points").innerText) || 0;
+  if (currentPts < totalCost) {
+    showToast(`积分不足：当前拥有 ${currentPts} 分，本次兑换需要 ${totalCost} 分！`, "error");
+    return;
+  }
+
+  if (!confirm(`确认消耗 ${totalCost} 积分立即兑换【${prodName} x${times}】吗？`)) {
+    return;
+  }
+
+  const btn = document.getElementById("btn-manual-order-submit");
+  btn.disabled = true;
+  btn.innerText = "正在下单兑换...";
+
+  try {
+    const res = await authFetch(`/api/accounts/${accId}/order`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prodId, prodName, prodType, costPoints, desktopId, times })
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast(data.message || `🎉 成功兑换 ${prodName} x${times}！`, "success");
+      closeModal("manual-redeem-modal");
+      await loadAccounts();
+    } else {
+      showToast(data.error || "兑换下单失败", "error");
+    }
+  } catch (e) {
+    showToast("请求异常: " + e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.innerText = "立即确认兑换";
   }
 }
 
@@ -1079,9 +1244,7 @@ function switchAuthMode(mode) {
   document.getElementById("btn-auth-submit").innerText = isLogin ? "立即登录" : "立即注册并登录";
   const tipEle = document.getElementById("auth-tip");
   if (tipEle) {
-    tipEle.innerHTML = isLogin 
-      ? '出厂默认超级管理员账号: <code>admin</code>，初始密码: <code>admin123</code> (登录后可随时更改)' 
-      : '提示：新注册用户登录后拥有独立控制台，默认配额上限由管理员分配。';
+    tipEle.innerHTML = "";
   }
 }
 

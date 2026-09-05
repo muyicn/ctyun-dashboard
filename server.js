@@ -43,6 +43,26 @@ function getBeijingTimeString() {
   return `${Y}-${M}-${D} ${h}:${m}:${s}`;
 }
 
+function getBeijingTimeOnly() {
+  const d = new Date();
+  const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
+  const bjTime = new Date(utc + (3600000 * 8));
+  const h = String(bjTime.getHours()).padStart(2, '0');
+  const m = String(bjTime.getMinutes()).padStart(2, '0');
+  const s = String(bjTime.getSeconds()).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+}
+
+function getBeijingDateOnly() {
+  const d = new Date();
+  const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
+  const bjTime = new Date(utc + (3600000 * 8));
+  const Y = bjTime.getFullYear();
+  const M = String(bjTime.getMonth() + 1).padStart(2, '0');
+  const D = String(bjTime.getDate()).padStart(2, '0');
+  return `${Y}-${M}-${D}`;
+}
+
 function appendLog(source, message, level = 'info', accountName = '') {
   const entry = {
     timestamp: getBeijingTimeString(),
@@ -656,6 +676,14 @@ class CtYunClient {
         if (hangTask) {
           this.account.stats.hangMinutesToday = Math.floor(hangTask.current / 60);
         }
+
+        // 核心联动：如果官方“登录AI云电脑”任务状态为已完成 (status === 2 或 current >= total)，自动同步今日已签到
+        const loginTask = this.metrics.officialTasks.find(t => t.name.includes('登录AI云电脑'));
+        if (loginTask && (loginTask.status === 2 || loginTask.current >= loginTask.total)) {
+          if (!this.account.stats.lastSignTime || !this.account.stats.lastSignTime.startsWith(getBeijingDateOnly())) {
+            this.account.stats.lastSignTime = getBeijingTimeString();
+          }
+        }
       }
 
       const pointRes = await (await fetch('https://desk.ctyun.cn/selforder/api/marketing/userPoints/getUserPoints', {
@@ -822,7 +850,7 @@ class CtYunClient {
               const hex = buf.toString('hex').toUpperCase();
 
               if (hex.startsWith('52454451')) {
-                const nowStr = new Date().toISOString().replace('T', ' ').substring(11, 19);
+                const nowStr = getBeijingTimeOnly();
                 appendLog('Heartbeat', `[${accName}][${this.metrics.desktopName}] 收到服务端保活校验 REDQ (${buf.length}B)`, 'info');
 
                 const responseBuf = this.encryptor.execute(buf);
@@ -1241,13 +1269,13 @@ const server = http.createServer(async (req, res) => {
     }
     const total = visibleAccounts.length;
     const online = visibleAccounts.filter(a => a.stats?.keepAliveStatus === 'online').length;
-    const today = new Date().toISOString().substring(0, 10);
-    const signed = visibleAccounts.filter(a => a.stats?.lastSignTime?.startsWith(today)).length;
+    const today = getBeijingDateOnly();
+    const signed = visibleAccounts.filter(a => a.stats?.lastSignTime && a.stats.lastSignTime.startsWith(today)).length;
     jsonResponse(res, {
       accountsTotal: total,
       onlineKeepAlive: online,
       signedToday: signed,
-      currentTime: new Date().toISOString().replace('T', ' ').substring(0, 19),
+      currentTime: getBeijingTimeString(),
       isGuest: false
     });
     return;
@@ -1593,7 +1621,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const client = getClient(acc);
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const now = getBeijingTimeString();
 
     try {
       if (taskType === 'sign') {
@@ -1602,6 +1630,7 @@ const server = http.createServer(async (req, res) => {
         executeRealHang(acc.user, acc.password, ocrEngine, 10, displayCfg, (src, msg, lvl) => appendLog(src, `[${acc.name}] ${msg}`, lvl))
           .then(async () => {
             acc.stats.lastSignTime = now;
+            saveConfig(appConfig);
             await client.refreshOfficialTasks();
             appendLog('Sign', `[${acc.name}] 官方打卡已成功，当前官方积分: ${client.metrics.userPoints}`, 'success');
           })
@@ -1615,6 +1644,7 @@ const server = http.createServer(async (req, res) => {
         executeRealAiChat(acc.user, acc.password, ocrEngine, (src, msg, lvl) => appendLog(src, `[${acc.name}] ${msg}`, lvl))
           .then(async () => {
             acc.stats.lastAiChatTime = now;
+            saveConfig(appConfig);
             await client.refreshOfficialTasks();
             appendLog('AIChat', `[${acc.name}] 官方 AI 对话任务已达成！+100 积分已入账，总积分: ${client.metrics.userPoints}`, 'success');
           })
@@ -1632,6 +1662,7 @@ const server = http.createServer(async (req, res) => {
         executeRealHang(acc.user, acc.password, ocrEngine, 120, displayCfg, (src, msg, lvl) => appendLog(src, `[${acc.name}] ${msg}`, lvl))
           .then(async () => {
             acc.stats.lastHangTime = now;
+            saveConfig(appConfig);
             await client.refreshOfficialTasks();
             const hangTask = client.metrics.officialTasks.find(t => t.name.includes('使用1小时'));
             const curSec = hangTask ? hangTask.current : 0;
@@ -1728,6 +1759,91 @@ const server = http.createServer(async (req, res) => {
       jsonResponse(res, formatted);
     } catch (e) {
       jsonResponse(res, []);
+    }
+    return;
+  }
+
+  // 手动下单兑换/抽奖接口
+  if (req.method === 'POST' && pathname.startsWith('/api/accounts/') && pathname.endsWith('/order')) {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+
+    const accId = pathname.split('/')[3];
+    const acc = appConfig.accounts.find(a => a.id === accId);
+    if (!acc) {
+      jsonResponse(res, { error: '账号不存在' }, 404);
+      return;
+    }
+
+    if (!canUserAccessAccount(session, acc)) {
+      jsonResponse(res, { error: '权限不足：无权操作该账号' }, 403);
+      return;
+    }
+
+    const body = await parseJsonBody(req);
+    const prodId = parseInt(body.prodId);
+    const prodName = body.prodName || '商品';
+    const prodType = body.prodType || 'pointstplupgrade';
+    const costPoints = parseInt(body.costPoints) || 0;
+    const desktopId = parseInt(body.desktopId) || 0;
+    const times = Math.max(1, parseInt(body.times) || 1);
+
+    if (!prodId || costPoints <= 0) {
+      jsonResponse(res, { error: '商品参数无效' }, 400);
+      return;
+    }
+
+    const client = getClient(acc);
+    try {
+      await client.refreshOfficialTasks();
+      const currentPts = client.metrics.userPoints || 0;
+      const totalCost = costPoints * times;
+      if (currentPts < totalCost) {
+        jsonResponse(res, { error: `积分不足：当前拥有 ${currentPts} 积分，本次兑换需要 ${totalCost} 积分！` }, 400);
+        return;
+      }
+
+      appendLog('Redeem', `[${acc.name}] 正在向天翼云发起真实下单: ${prodName} x${times}，消耗 ${totalCost} 积分...`, 'info');
+
+      const placeOrderUrl = 'https://desk.ctyun.cn/selforder/api/selforder/paas/placeOrder';
+      const orderPayload = {
+        busiChannel: '010',
+        orderType: 1,
+        pointType: 1,
+        points: totalCost,
+        sku: Array.from({ length: times }).map((_, idx) => ({
+          execSort: idx + 1,
+          prodId,
+          prodType,
+          attrs: desktopId ? [{ attrKey: 'bindDesktopId', attrVal: desktopId }] : []
+        }))
+      };
+
+      const orderRes = await fetch(placeOrderUrl, {
+        method: 'POST',
+        headers: client.getSignedHeaders({ 'Content-Type': 'application/json;charset=UTF-8' }),
+        body: JSON.stringify(orderPayload)
+      });
+      const orderData = await orderRes.json();
+
+      if (orderData.code === 0) {
+        await client.refreshOfficialTasks();
+        appendLog('Redeem', `[${acc.name}] 🎉 恭喜！成功兑换【${prodName} x${times}】，已消耗 ${totalCost} 积分！`, 'success');
+        sendNotification(
+          appConfig.settings,
+          `🎉 天翼云积分兑换成功 - ${acc.name}`,
+          `账号 [${acc.name}] 成功兑换 [${prodName} x${times}]，扣除 ${totalCost} 积分，当前剩余: ${client.metrics.userPoints} 积分。`
+        );
+        jsonResponse(res, { success: true, message: `兑换成功！消耗 ${totalCost} 积分，剩余 ${client.metrics.userPoints} 积分` });
+      } else {
+        appendLog('Redeem', `[${acc.name}] 下单失败: ${orderData.msg || '未知错误'}`, 'error');
+        jsonResponse(res, { error: `兑换失败(${orderData.code}): ${orderData.msg || '未知原因'}` }, 400);
+      }
+    } catch (e) {
+      jsonResponse(res, { error: `下单请求异常: ${e.message}` }, 500);
     }
     return;
   }
