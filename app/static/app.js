@@ -154,6 +154,7 @@ async function loadStatus() {
     document.getElementById("stat-total").innerText = data.accountsTotal || 0;
     document.getElementById("stat-online").innerText = data.onlineKeepAlive || 0;
     document.getElementById("stat-signed").innerText = data.signedToday || 0;
+    document.getElementById("stat-points").innerText = data.totalEarnedPoints || 0;
   } catch (e) {
     console.error("加载状态异常:", e);
   }
@@ -355,6 +356,7 @@ function renderAccounts() {
         <button class="btn btn-sm btn-primary" onclick="triggerTask('${acc.id}', 'aiChat')">立即AI对话</button>
         <button class="btn btn-sm" onclick="triggerTask('${acc.id}', 'hang')">立即挂机同步</button>
         <button class="btn btn-sm btn-warning" onclick="openManualRedeemModal('${acc.id}')" title="根据当前积分手动兑换商品或抽奖">🎁 手动兑换</button>
+        <button class="btn btn-sm" onclick="openPowerModal('${acc.id}')" title="云电脑电源管理 (开机/重启/关机)">⚡ 电源管理</button>
         <button class="btn btn-sm" onclick="openDisplayModal('${acc.id}')" title="设置云电脑分辨率与缩放比">🖥️ 分辨率: ${acc.displayConfig?.width || 2560}*${acc.displayConfig?.height || 1440} (${acc.displayConfig?.scale || 150}%)</button>
         ${!acc.bound ? `<button class="btn btn-sm btn-warning" onclick="openSmsModal('${acc.id}')">📲 短信绑定</button>` : ''}
       </div>
@@ -372,7 +374,7 @@ async function toggleFeature(accId, featureKey, checked) {
   acc.features[featureKey] = checked;
 
   try {
-    const res = await fetch(`/api/accounts/${accId}`, {
+    const res = await authFetch(`/api/accounts/${accId}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ features: acc.features })
@@ -381,9 +383,14 @@ async function toggleFeature(accId, featureKey, checked) {
       showToast(`已${checked ? '开启' : '关闭'}该功能`, "success");
     } else {
       showToast("更新失败", "error");
+      // 更新失败则还原界面的复选状态
+      acc.features[featureKey] = !checked;
+      renderAccounts();
     }
   } catch (e) {
     showToast("网络请求异常: " + e.message, "error");
+    acc.features[featureKey] = !checked;
+    renderAccounts();
   }
 }
 
@@ -850,6 +857,44 @@ async function submitManualRedeemOrder() {
   } finally {
     btn.disabled = false;
     btn.innerText = "立即确认兑换";
+  }
+}
+
+// ==========================================
+// 云电脑电源管理 (开机 / 重启 / 关机)
+// ==========================================
+function openPowerModal(accId) {
+  const acc = accounts.find(a => a.id === accId);
+  if (!acc) return;
+  document.getElementById("power-acc-id").value = acc.id;
+  document.getElementById("power-desktop-name").innerText = `${acc.liveMetrics?.desktopName || acc.name} (${acc.liveMetrics?.currentHost || '云电脑'})`;
+  openModal("power-modal");
+}
+
+async function executePowerAction(action) {
+  const accId = document.getElementById("power-acc-id").value;
+  const actionNames = { poweron: '开机', reboot: '重启', shutdown: '关机' };
+  const actionName = actionNames[action] || action;
+
+  if (action === 'shutdown' || action === 'reboot') {
+    if (!confirm(`确认要对云电脑下达【${actionName}】指令吗？未保存的数据可能会丢失。`)) {
+      return;
+    }
+  }
+
+  showToast(`正在向天翼云下发【${actionName}】指令...`, "info");
+  try {
+    const res = await authFetch(`/api/accounts/${accId}/power/${action}`, { method: "POST" });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast(data.message || `【${actionName}】指令下达成功！`, "success");
+      closeModal("power-modal");
+      setTimeout(() => loadAccounts(true), 2000);
+    } else {
+      showToast(data.error || `操作失败: ${data.message || '网关拒绝'}`, "error");
+    }
+  } catch (e) {
+    showToast("请求异常: " + e.message, "error");
   }
 }
 

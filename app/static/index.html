@@ -71,8 +71,8 @@
       <div class="stat-card">
         <div class="stat-icon">🎁</div>
         <div class="stat-info">
-          <div class="stat-value" id="stat-points">300</div>
-          <div class="stat-label">每日预计可得积分</div>
+          <div class="stat-value" id="stat-points">0</div>
+          <div class="stat-label">每日已获得积分</div>
         </div>
       </div>
     </div>
@@ -250,6 +250,33 @@
       <div class="modal-footer">
         <button class="btn" onclick="closeModal('redeem-modal')">取消</button>
         <button class="btn btn-primary" onclick="saveRedeemConfig()">保存兑换设置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 云电脑电源管理 (开机/重启/关机) 模态框 -->
+  <div class="modal-backdrop hidden" id="power-modal">
+    <div class="modal" style="max-width: 480px;">
+      <div class="modal-header">
+        <h3>⚡ 云电脑电源管理</h3>
+        <button class="modal-close" onclick="closeModal('power-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="power-acc-id">
+        <p style="font-size: 13px; color: var(--text-muted);">
+          向天翼云下达电源控制指令。执行重启或关机前请确保云电脑内已保存重要数据。
+        </p>
+        <div style="background: var(--bg-card); padding: 12px 14px; border-radius: 8px; border: 1px solid var(--border); font-size: 13px;">
+          当前云电脑: <b id="power-desktop-name" style="color: #0f172a;">--</b>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 6px;">
+          <button class="btn btn-success" onclick="executePowerAction('poweron')">🟢 开机 / 唤醒</button>
+          <button class="btn btn-warning" onclick="executePowerAction('reboot')">🔄 重启云电脑</button>
+          <button class="btn btn-danger" onclick="executePowerAction('shutdown')">🔴 关机</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('power-modal')">关闭</button>
       </div>
     </div>
   </div>

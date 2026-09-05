@@ -580,7 +580,7 @@ class CtYunClient {
     return json.code === 0 && json.data ? json.data.desktopList || [] : [];
   }
 
-  async connect(desktopId) {
+  async connect(desktopId, vdCommand = '') {
     if (!this.loginInfo) {
       const logRes = await this.login();
       if (!logRes.success) throw new Error(logRes.error);
@@ -590,7 +590,7 @@ class CtYunClient {
       objType: '0',
       osType: '15',
       deviceId: this.deviceType,
-      vdCommand: '',
+      vdCommand: vdCommand || '',
       ipAddress: '',
       macAddress: '',
       deviceCode: this.account.deviceCode,
@@ -608,10 +608,36 @@ class CtYunClient {
       body: connBody.toString()
     });
     const json = await res.json();
-    if (json.code === 0 && json.data?.desktopInfo) {
-      return json.data.desktopInfo;
+    if (json.code === 0) {
+      return json.data?.desktopInfo || json.data;
     }
     throw new Error(json.msg || '获取云电脑连接配置失败');
+  }
+
+  // 云电脑电源管理操作 (开机: start / 重启: reboot / 关机: shutdown)
+  async controlPower(desktopId, action) {
+    const accName = this.account.name || this.account.user;
+    appendLog('System', `[${accName}] 正在下发云电脑电源指令: ${action} ...`, 'info');
+    
+    // 天翼云标准电源指令映射
+    const cmdMap = {
+      'poweron': 'start',
+      'start': 'start',
+      'reboot': 'reboot',
+      'restart': 'reboot',
+      'shutdown': 'shutdown',
+      'poweroff': 'shutdown'
+    };
+    const finalCmd = cmdMap[action.toLowerCase()] || action;
+
+    try {
+      await this.connect(desktopId, finalCmd);
+      appendLog('System', `[${accName}] ✅ 云电脑【${action}】指令已成功下达天翼云网关`, 'success');
+      return { success: true, message: `指令【${action}】已成功下达！` };
+    } catch (e) {
+      appendLog('System', `[${accName}] ❌ 下发电源指令失败: ${e.message}`, 'error');
+      return { success: false, error: e.message };
+    }
   }
 
   // 智能关机检测与自动开机等待保活保障
@@ -1271,10 +1297,18 @@ const server = http.createServer(async (req, res) => {
     const online = visibleAccounts.filter(a => a.stats?.keepAliveStatus === 'online').length;
     const today = getBeijingDateOnly();
     const signed = visibleAccounts.filter(a => a.stats?.lastSignTime && a.stats.lastSignTime.startsWith(today)).length;
+    // 汇总该用户可见账号的今日已获得总积分
+    const totalPointsSum = visibleAccounts.reduce((sum, a) => {
+      const client = clientInstances.get(a.id);
+      const curPts = (client && client.metrics.userPoints) ? client.metrics.userPoints : (a.stats?.points || 0);
+      return sum + curPts;
+    }, 0);
+
     jsonResponse(res, {
       accountsTotal: total,
       onlineKeepAlive: online,
       signedToday: signed,
+      totalEarnedPoints: totalPointsSum,
       currentTime: getBeijingTimeString(),
       isGuest: false
     });
@@ -1844,6 +1878,48 @@ const server = http.createServer(async (req, res) => {
       }
     } catch (e) {
       jsonResponse(res, { error: `下单请求异常: ${e.message}` }, 500);
+    }
+    return;
+  }
+
+  // 云电脑电源管理操作 API (开机 / 重启 / 关机)
+  if (req.method === 'POST' && pathname.startsWith('/api/accounts/') && pathname.includes('/power/')) {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+
+    const parts = pathname.split('/');
+    const accId = parts[3];
+    const action = parts[5]; // poweron / reboot / shutdown
+    const acc = appConfig.accounts.find(a => a.id === accId);
+    if (!acc) {
+      jsonResponse(res, { error: '账号不存在' }, 404);
+      return;
+    }
+
+    if (!canUserAccessAccount(session, acc)) {
+      jsonResponse(res, { error: '权限不足：无权操作该账号' }, 403);
+      return;
+    }
+
+    const client = getClient(acc);
+    try {
+      const desktops = await client.getDesktops();
+      if (!desktops || desktops.length === 0) {
+        jsonResponse(res, { error: '未检测到可用云电脑' }, 400);
+        return;
+      }
+      const desktopId = desktops[0].objId || desktops[0].desktopId;
+      const resPower = await client.controlPower(desktopId, action);
+      if (resPower.success) {
+        jsonResponse(res, resPower);
+      } else {
+        jsonResponse(res, resPower, 400);
+      }
+    } catch (e) {
+      jsonResponse(res, { error: e.message }, 500);
     }
     return;
   }
