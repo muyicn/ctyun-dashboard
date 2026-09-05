@@ -1727,19 +1727,30 @@ const server = http.createServer(async (req, res) => {
         if (!client.wsAlive) {
           client.startKeepAliveWorker();
         }
+
+        // 检查官方任务是否已满 1 小时 (3600秒 或 status === 2)
+        await client.refreshOfficialTasks();
+        const hangTask = client.metrics.officialTasks.find(t => t.name.includes('使用1小时'));
+        const alreadyCompleted = hangTask && (hangTask.status === 2 || (hangTask.total > 0 && hangTask.current >= hangTask.total));
+        
+        // 若已经满1小时，登录进入后保持10秒即可自动退出释放资源！若未满1小时，则保持挂机120秒持续累加
+        const hangDuration = alreadyCompleted ? 10 : 120;
+        if (alreadyCompleted) {
+          appendLog('Hang', `[${acc.name}] 今日挂机1小时任务已全部达成 (3600秒达成)，本次将执行10秒快速心跳同步并退出释放资源...`, 'info');
+        }
+
         const displayCfg = acc.displayConfig || { width: 2560, height: 1440, scale: 150 };
-        executeRealHang(acc.user, acc.password, ocrEngine, 120, displayCfg, (src, msg, lvl) => appendLog(src, `[${acc.name}] ${msg}`, lvl))
+        executeRealHang(acc.user, acc.password, ocrEngine, hangDuration, displayCfg, (src, msg, lvl) => appendLog(src, `[${acc.name}] ${msg}`, lvl))
           .then(async () => {
             acc.stats.lastHangTime = now;
             saveConfig(appConfig);
             await client.refreshOfficialTasks();
-            const hangTask = client.metrics.officialTasks.find(t => t.name.includes('使用1小时'));
             const curSec = hangTask ? hangTask.current : 0;
-            appendLog('Hang', `[${acc.name}] 挂机进度已同步至官方后台: 已累计 ${curSec} / 3600 秒`, 'success');
+            appendLog('Hang', `[${acc.name}] 挂机任务已同步完成: 官方后台记录已累计 ${curSec} / 3600 秒`, 'success');
           })
           .catch(err => appendLog('Hang', `[${acc.name}] 挂机自动化异常: ${err.message}`, 'error'));
 
-        jsonResponse(res, { message: `[${acc.name}] 云电脑挂机已启动并在真实运行中，官方秒数将自动累加` });
+        jsonResponse(res, { message: alreadyCompleted ? `[${acc.name}] 今日已满1小时，已启动10秒快速同步` : `[${acc.name}] 云电脑挂机已启动并在真实运行中，官方秒数将自动累加` });
         return;
 
       } else if (taskType === 'redeem') {
@@ -1828,6 +1839,54 @@ const server = http.createServer(async (req, res) => {
       jsonResponse(res, formatted);
     } catch (e) {
       jsonResponse(res, []);
+    }
+    return;
+  }
+
+  // 获取云电脑 Web 直达访问参数 API (包括目标页面 URL、设备码与免密凭证信息)
+  if (req.method === 'GET' && pathname.startsWith('/api/accounts/') && pathname.endsWith('/web-launch')) {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+
+    const accId = pathname.split('/')[3];
+    const acc = appConfig.accounts.find(a => a.id === accId);
+    if (!acc) {
+      jsonResponse(res, { error: '账号不存在' }, 404);
+      return;
+    }
+
+    if (!canUserAccessAccount(session, acc)) {
+      jsonResponse(res, { error: '权限不足：无权访问该账号' }, 403);
+      return;
+    }
+
+    const client = getClient(acc);
+    try {
+      const desktops = await client.getDesktops();
+      if (!desktops || desktops.length === 0) {
+        jsonResponse(res, { error: '未检测到可用云电脑' }, 400);
+        return;
+      }
+      const desktop = desktops[0];
+      const objId = desktop.objId || desktop.desktopId;
+      const b64Id = Buffer.from(String(objId)).toString('base64');
+      const targetUrl = `https://pc.ctyun.cn/#/desktop?id=${encodeURIComponent(b64Id)}`;
+
+      const displayCfg = acc.displayConfig || { width: 2560, height: 1440, scale: 150 };
+
+      jsonResponse(res, {
+        success: true,
+        user: acc.user,
+        deviceCode: acc.deviceCode,
+        targetUrl,
+        desktopName: desktop.objName || desktop.desktopName || '云电脑',
+        displayConfig: displayCfg
+      });
+    } catch (e) {
+      jsonResponse(res, { error: e.message }, 500);
     }
     return;
   }

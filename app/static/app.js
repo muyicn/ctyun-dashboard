@@ -417,6 +417,7 @@ function renderAccounts() {
 
       <!-- 快捷操作按钮 -->
       <div class="card-actions">
+        <button class="btn btn-sm btn-primary" onclick="launchWebDesktop('${acc.id}')" title="直接在弹窗浏览器中免密直达访问云电脑桌面 (自动适配设定的分辨率与缩放比)">🚀 访问云电脑</button>
         <button class="btn btn-sm btn-success" onclick="triggerTask('${acc.id}', 'sign')">立即打卡</button>
         <button class="btn btn-sm btn-primary" onclick="triggerTask('${acc.id}', 'aiChat')">立即AI对话</button>
         <button class="btn btn-sm" onclick="triggerTask('${acc.id}', 'hang')">立即挂机同步</button>
@@ -960,6 +961,47 @@ async function executePowerAction(action) {
     }
   } catch (e) {
     showToast("请求异常: " + e.message, "error");
+  }
+}
+
+// ==========================================
+// 弹窗浏览器免密直达访问云电脑 (自动匹配设定的分辨率与缩放)
+// ==========================================
+async function launchWebDesktop(accId) {
+  const acc = accounts.find(a => a.id === accId);
+  if (!acc) return;
+
+  showToast(`正在获取 [${acc.name || acc.user}] 的云电脑直达访问会话...`, "info");
+
+  try {
+    const res = await authFetch(`/api/accounts/${accId}/web-launch`);
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      showToast(data.error || "获取访问会话失败", "error");
+      return;
+    }
+
+    const d = data.displayConfig || { width: 2560, height: 1440, scale: 150 };
+    const winWidth = Math.min(window.screen.availWidth || 1920, parseInt(d.width) || 2560);
+    const winHeight = Math.min(window.screen.availHeight || 1080, parseInt(d.height) || 1440);
+    const left = Math.max(0, Math.round((window.screen.availWidth - winWidth) / 2));
+    const top = Math.max(0, Math.round((window.screen.availHeight - winHeight) / 2));
+
+    const windowFeatures = `width=${winWidth},height=${winHeight},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes`;
+    
+    // 打开独立弹窗窗口
+    const popup = window.open(data.targetUrl, `ctyun_desktop_${accId}`, windowFeatures);
+
+    if (popup) {
+      popup.focus();
+      showToast(`已为您弹出独立窗口访问【${data.desktopName}】 (分辨率: ${d.width}x${d.height} @ ${d.scale}%)`, "success");
+    } else {
+      showToast("弹窗被浏览器拦截，请在地址栏右侧允许本站点弹出窗口！", "warning");
+      // 降级新标签页打开
+      window.open(data.targetUrl, '_blank');
+    }
+  } catch (e) {
+    showToast("访问请求异常: " + e.message, "error");
   }
 }
 
