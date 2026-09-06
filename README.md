@@ -53,6 +53,19 @@
 
 ### 方式一：直接拉取预构建镜像（最推荐、飞牛 NAS / Docker 专用）
 
+可以直接拉取官方 Docker Hub 镜像，也可以拉取 GitHub Packages 镜像：
+
+```bash
+# Docker Hub 镜像 (推荐国内 NAS 用户拉取)
+docker run -d \
+  --name ctyun-dashboard \
+  -p 8080:8080 \
+  -v $(pwd)/data:/app/data \
+  --restart unless-stopped \
+  muyicn/ctyun-dashboard:latest
+```
+
+或使用 GitHub Packages (GHCR) 镜像：
 ```bash
 docker run -d \
   --name ctyun-dashboard \
@@ -68,7 +81,7 @@ docker run -d \
 version: '3.8'
 services:
   ctyun-dashboard:
-    image: ghcr.io/muyicn/ctyun-dashboard:latest
+    image: muyicn/ctyun-dashboard:latest # 或 ghcr.io/muyicn/ctyun-dashboard:latest
     container_name: ctyun-dashboard
     restart: unless-stopped
     ports:
