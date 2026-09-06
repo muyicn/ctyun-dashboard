@@ -1,0 +1,8 @@
+node_modules
+.git
+.github
+*.log
+data/*
+!data/.gitkeep
+test*
+*.tmp
