@@ -62,7 +62,7 @@ docker run -d \
   -p 8080:8080 \
   -v $(pwd)/data:/app/data \
   --restart unless-stopped \
-  muyicn/ctyun-dashboard:latest
+  learycn/ctyun-dashboard:latest
 ```
 
 或使用 GitHub Packages (GHCR) 镜像：
@@ -81,7 +81,7 @@ docker run -d \
 version: '3.8'
 services:
   ctyun-dashboard:
-    image: muyicn/ctyun-dashboard:latest # 或 ghcr.io/muyicn/ctyun-dashboard:latest
+    image: learycn/ctyun-dashboard:latest # 或 ghcr.io/muyicn/ctyun-dashboard:latest
     container_name: ctyun-dashboard
     restart: unless-stopped
     ports:
