@@ -33,13 +33,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2. 登录 Docker Hub (如果仓库配置了 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN，或者 DOCKER_USERNAME / DOCKER_PASSWORD)
+      # 2. 登录 Docker Hub (使用标准 env 映射 secrets，符合 GitHub Actions 语法规范)
       - name: Log in to Docker Hub
-        if: "${{ (secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '') || (secrets.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != '') }}"
+        env:
+          DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKER_USERNAME }}
+          DOCKER_PASS: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKER_PASSWORD }}
+        if: env.DOCKER_USER != '' && env.DOCKER_PASS != ''
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKER_PASSWORD }}
+          username: ${{ env.DOCKER_USER }}
+          password: ${{ env.DOCKER_PASS }}
 
       # 3. 提取双源标签 (同时推送到 GHCR 和 Docker Hub)
       - name: Extract Docker metadata
@@ -48,13 +51,13 @@ jobs:
         with:
           images: |
             ghcr.io/${{ github.repository }}
-            ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKER_USERNAME || 'muyicn' }}/ctyun-dashboard
+            muyicn/ctyun-dashboard
           tags: |
             type=raw,value=latest
             type=ref,event=branch
             type=semver,pattern={{version}}
 
-      # 4. 构建多架构镜像并同时推送到两个镜像源
+      # 4. 构建多架构镜像并同时推送到镜像源
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
