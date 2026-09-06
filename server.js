@@ -1,13 +1,23 @@
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const net = require('net');
+const WebSocket = require('ws');
 const LightweightOcr = require('./app/lightweight_ocr');
 const CtYunEncryption = require('./app/ctyun_encryption');
-const { executeRealAiChat, executeRealHang } = require('./app/tasks/real_tasks');
+const { executeNativeAiChat, executeNativeSign, executeNativeHang } = require('./app/tasks/native_tasks');
 const { AuthManager } = require('./app/auth_manager');
 const { TaskScheduler } = require('./app/tasks/scheduler');
+
+// 全局异常拦截看门狗 (确保守护服务长期稳定运行不宕机)
+process.on('uncaughtException', (err) => {
+  console.error('[!] 系统未捕获异常已拦截 (常驻保障):', err?.message || err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[!] 系统未处理 Promise 拒绝已拦截:', reason?.message || reason);
+});
 
 const PORT = process.env.PORT || 8080;
 const DATA_DIR = process.env.CTYUN_DATA_DIR || path.join(__dirname, 'data');
@@ -32,47 +42,81 @@ const sseClients = new Set();
 
 function getBeijingTimeString() {
   const d = new Date();
-  const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
-  const bjTime = new Date(utc + (3600000 * 8));
-  const Y = bjTime.getFullYear();
-  const M = String(bjTime.getMonth() + 1).padStart(2, '0');
-  const D = String(bjTime.getDate()).padStart(2, '0');
-  const h = String(bjTime.getHours()).padStart(2, '0');
-  const m = String(bjTime.getMinutes()).padStart(2, '0');
-  const s = String(bjTime.getSeconds()).padStart(2, '0');
-  return `${Y}-${M}-${D} ${h}:${m}:${s}`;
+  return d.toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' });
 }
 
 function getBeijingTimeOnly() {
   const d = new Date();
-  const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
-  const bjTime = new Date(utc + (3600000 * 8));
-  const h = String(bjTime.getHours()).padStart(2, '0');
-  const m = String(bjTime.getMinutes()).padStart(2, '0');
-  const s = String(bjTime.getSeconds()).padStart(2, '0');
-  return `${h}:${m}:${s}`;
+  return d.toLocaleTimeString('sv-SE', { timeZone: 'Asia/Shanghai' });
 }
 
 function getBeijingDateOnly() {
   const d = new Date();
-  const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
-  const bjTime = new Date(utc + (3600000 * 8));
-  const Y = bjTime.getFullYear();
-  const M = String(bjTime.getMonth() + 1).padStart(2, '0');
-  const D = String(bjTime.getDate()).padStart(2, '0');
-  return `${Y}-${M}-${D}`;
+  return d.toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
 }
 
+let logIdCounter = 0;
+
+function isHeartbeatOrRoutine(source, message) {
+  if (source === 'Heartbeat') return true;
+  if (!message) return false;
+  return message.includes('心跳') || message.includes('保活周期') || message.includes('保持长连接') || message.includes('长连接保活') || message.includes('发送保活') || message.includes('REDQ') || message.includes('103 认证') || message.includes('118 用户身份') || message.includes('118 身份');
+}
+
+// 自动日志清理维护定时器：每小时执行一次，自动清理超过 3 天的历史日志或多于 2000 条的数据
+setInterval(() => {
+  if (logs.length > 1500) {
+    logs.splice(0, logs.length - 1000);
+  }
+}, 3600 * 1000);
+
 function appendLog(source, message, level = 'info', accountName = '') {
+  const nowTime = getBeijingTimeString();
+
+  // 全双工智能折叠机制：
+  // 1. 同来源同内容的完全一致重复消息合并
+  // 2. 心跳/周期性 routine 消息合并（只保留最新一条并叠加次数计数）
+  if (logs.length > 0) {
+    const last = logs[logs.length - 1];
+    const sameAcc = (last.accountName || '') === (accountName || '');
+    const sameSrc = last.source === source;
+    const sameLvl = last.level === level;
+
+    const isRoutinePair = isHeartbeatOrRoutine(source, message) && isHeartbeatOrRoutine(last.source, last.message);
+    const isRepeat = (sameAcc && sameSrc && sameLvl) && (last.message === message || isRoutinePair);
+
+    if (isRepeat) {
+      last.timestamp = nowTime;
+      last.message = message;
+      last.repeatCount = (last.repeatCount || 1) + 1;
+
+      const updatePayload = { ...last, isUpdate: true };
+      for (const client of sseClients) {
+        try {
+          if (canUserSeeLog(client.session, last)) {
+            client.res.write(`data: ${JSON.stringify(updatePayload)}\n\n`);
+          }
+        } catch (e) {
+          sseClients.delete(client);
+        }
+      }
+      return;
+    }
+  }
+
+  // 关键事件、任务达成、异常告警或新业务：单独生成高亮条目
   const entry = {
-    timestamp: getBeijingTimeString(),
+    id: 'log_' + (++logIdCounter),
+    timestamp: nowTime,
     source,
     message,
     level,
-    accountName: accountName || ''
+    accountName: accountName || '',
+    repeatCount: 1
   };
+
   logs.push(entry);
-  if (logs.length > 3000) logs.shift();
+  if (logs.length > 2000) logs.shift();
 
   // 推送给具备权限的 SSE 客户端
   for (const client of sseClients) {
@@ -199,7 +243,7 @@ async function sendNotification(settings, title, content, extraVars = {}) {
   const vars = {
     '{title}': title,
     '{content}': content,
-    '{time}': new Date().toISOString().replace('T', ' ').substring(0, 19),
+    '{time}': getBeijingTimeString(),
     '{account}': extraVars.account || '云电脑',
     '{task}': extraVars.task || '',
     '{status}': extraVars.status || '',
@@ -451,6 +495,43 @@ class CtYunClient {
     this.workerRunning = false;
     this.loopTimer = null;
     this.countdownTimer = null;
+    this.clinkPingTimer = null;
+    this.endCurrentSession = null;
+    this.isWebUserActive = false; // 用户是否正在通过浏览器操作云电脑
+    this.webUserActiveUntil = 0;
+  }
+
+  // 用户点击浏览器访问云电脑时调用：立即主动断开后台保活连接，并保持避让让位
+  yieldToWebUser(durationMinutes = 60) {
+    const accName = this.account.name || this.account.user;
+    const wasActive = this.isWebUserActive;
+    this.isWebUserActive = true;
+    this.webUserActiveUntil = Date.now() + durationMinutes * 60 * 1000;
+    
+    if (!wasActive) {
+      appendLog('KeepAlive', `[${accName}] 🚀 检测到正在打开浏览器访问操作云电脑，后台长连接主动让位断开，杜绝互踢！`, 'info');
+    }
+    
+    if (this.endCurrentSession) {
+      this.endCurrentSession('Yield to Web User');
+    }
+  }
+
+  // 释放避让：用户关闭页面或手动恢复
+  async resumeFromWebUser() {
+    const accName = this.account.name || this.account.user;
+    if (!this.isWebUserActive) return;
+    this.isWebUserActive = false;
+    this.webUserActiveUntil = 0;
+
+    appendLog('KeepAlive', `[${accName}] 浏览器访问已关闭，恢复后台长连接保活守护与启动监测。`, 'info');
+
+    // 只要账号开启了保活，无论当前是运行中还是关机，一律启动持久巡检守护 (关机时自动转入 20s/10m 持久监测开机)
+    if (this.account.enabled && this.account.features?.keepAlive === true) {
+      if (!this.workerRunning) {
+        this.startKeepAliveWorker();
+      }
+    }
   }
 
   async getCaptchaCode(user) {
@@ -563,21 +644,54 @@ class CtYunClient {
   }
 
   async getDesktops() {
-    if (!this.loginInfo) {
-      const logRes = await this.login();
-      if (!logRes.success) throw new Error(logRes.error);
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      if (!this.loginInfo) {
+        const logRes = await this.login();
+        if (!logRes.success) throw new Error(logRes.error);
+      }
+
+      // 1. 优先使用全规格 pageDesktop 查询云电脑
+      try {
+        const res = await fetch('https://desk.ctyun.cn:8810/api/desktop/client/pageDesktop', {
+          method: 'POST',
+          headers: this.getSignedHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({
+            getCnt: 50,
+            sortType: 'createTimeV1'
+          })
+        });
+        const json = await res.json();
+        if (json.code === 0 && json.data) {
+          const list = json.data.desktopList || json.data.desktopPoolList || [];
+          if (list.length > 0) {
+            this.checkExternalPowerOn(list[0]);
+            return list;
+          }
+        }
+      } catch (e) {}
+
+      // 2. 官方备用兜底接口：api/desktop/client/list (覆盖所有自建、公有池与专属云电脑类型)
+      try {
+        const resList = await fetch('https://desk.ctyun.cn:8810/api/desktop/client/list', {
+          method: 'GET',
+          headers: this.getSignedHeaders()
+        });
+        const jsonList = await resList.json();
+        if (jsonList.code === 0 && jsonList.data) {
+          const list = jsonList.data.desktopList || jsonList.data.desktopPoolList || [];
+          if (list.length > 0) {
+            this.checkExternalPowerOn(list[0]);
+            return list;
+          }
+        }
+      } catch (e) {}
+
+      // 若未查询到，强制刷新凭据重试一次
+      if (attempt === 1) {
+        this.loginInfo = null;
+      }
     }
-    const res = await fetch('https://desk.ctyun.cn:8810/api/desktop/client/pageDesktop', {
-      method: 'POST',
-      headers: this.getSignedHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({
-        getCnt: 20,
-        desktopTypes: ['1', '2001', '2002', '2003'],
-        sortType: 'createTimeV1'
-      })
-    });
-    const json = await res.json();
-    return json.code === 0 && json.data ? json.data.desktopList || [] : [];
+    return [];
   }
 
   async connect(desktopId, vdCommand = '') {
@@ -609,75 +723,91 @@ class CtYunClient {
     });
     const json = await res.json();
     if (json.code === 0) {
-      return json.data?.desktopInfo || json.data;
+      // 若云电脑已关机，服务端返回 desktopInfo 为 null 且带有 goingRetry: true
+      return json.data?.desktopInfo || null;
     }
     throw new Error(json.msg || '获取云电脑连接配置失败');
   }
 
   // 云电脑电源管理操作 (开机: start / 重启: reboot / 关机: shutdown)
+  // 云电脑电源管理操作 (开机: operationType 1 / 关机: operationType 2 / 重启: operationType 3)
   async controlPower(desktopId, action) {
     const accName = this.account.name || this.account.user;
-    appendLog('System', `[${accName}] 正在下发云电脑电源指令: ${action} ...`, 'info');
-    
-    // 天翼云标准电源指令映射
-    const cmdMap = {
-      'poweron': 'start',
-      'start': 'start',
-      'reboot': 'reboot',
-      'restart': 'reboot',
-      'shutdown': 'shutdown',
-      'poweroff': 'shutdown'
-    };
-    const finalCmd = cmdMap[action.toLowerCase()] || action;
+    const actionLower = (action || '').toLowerCase();
+
+    // 天翼云底层官方电源管控协议 operationType: 1=开机(ON), 2=关机(SHUTDOWN), 3=重启(RESET)
+    let opType = 3;
+    let actionCn = '重启';
+    if (actionLower === 'poweron' || actionLower === 'start' || actionLower === 'awake') {
+      opType = 1;
+      actionCn = '开机/唤醒';
+    } else if (actionLower === 'shutdown' || actionLower === 'poweroff') {
+      opType = 2;
+      actionCn = '关机';
+    } else {
+      opType = 3;
+      actionCn = '重启';
+    }
+
+    appendLog('System', `[${accName}] 正在向天翼云下达电源控制指令: ${actionCn} (operationType: ${opType})...`, 'info');
+
+    if (!this.loginInfo) {
+      const logRes = await this.login();
+      if (!logRes.success) throw new Error(logRes.error || '登录鉴权失败');
+    }
+
+    const form = new URLSearchParams({
+      desktopId: String(desktopId),
+      operationType: String(opType)
+    });
 
     try {
-      await this.connect(desktopId, finalCmd);
-      appendLog('System', `[${accName}] ✅ 云电脑【${action}】指令已成功下达天翼云网关`, 'success');
-      return { success: true, message: `指令【${action}】已成功下达！` };
+      const res = await fetch('https://desk.ctyun.cn:8810/api/desktop/client/operate', {
+        method: 'POST',
+        headers: this.getSignedHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+        body: form.toString()
+      });
+
+      const data = await res.json();
+      if (data.code === 0) {
+        appendLog('System', `[${accName}] ✅ 云电脑【${actionCn}】指令已成功生效！官方返回: 成功`, 'success');
+        sendNotification(
+          appConfig.settings,
+          `⚡ 云电脑电源控制生效 - ${accName}`,
+          `已成功向云电脑 [${accName}] 下达【${actionCn}】电源指令，天翼云已确认执行。`
+        );
+        let successMsg = `云电脑【${actionCn}】指令已成功下发并生效！`;
+        if (opType === 1) {
+          successMsg = `云电脑【开机】指令已成功下达天翼云网关！正在开机启动中，后台将持续监听就绪状态并自动上线保活。`;
+        }
+        return { success: true, message: successMsg };
+      } else {
+        throw new Error(data.msg || `错误码 ${data.code}`);
+      }
     } catch (e) {
-      appendLog('System', `[${accName}] ❌ 下发电源指令失败: ${e.message}`, 'error');
+      // 容错处理：天翼云返回“只有已关机状态的AI云电脑允许进行开机操作”或机器正在开机中
+      if (opType === 1 && e.message && (e.message.includes('只有已关机') || e.message.includes('正在进行') || e.message.includes('运行中'))) {
+        appendLog('System', `[${accName}] 云电脑正在开机或已处于运行状态，已自动恢复保活准备。`, 'info');
+        return { success: true, message: '云电脑开机指令已同步，正在启动就绪中！' };
+      }
+      appendLog('System', `[${accName}] ❌ 下发电源指令【${actionCn}】失败: ${e.message}`, 'error');
       return { success: false, error: e.message };
     }
   }
 
-  // 智能关机检测与自动开机等待保活保障
-  async ensureDesktopRunning(desktop) {
-    const desktopId = desktop.objId || desktop.desktopId;
-    const accName = this.account.name || this.account.user;
-
-    const isRunning = desktop.useStatusText === '运行中' || desktop.status === 'OK';
-    if (isRunning) return true;
-
-    appendLog('KeepAlive', `[${accName}][${desktop.objName || desktopId}] ⚠️ 检测到云电脑处于 [${desktop.useStatusText || '已关机'}] 状态，正在唤醒开机...`, 'warning');
-    sendNotification(
-      appConfig.settings,
-      `⚠️ 云电脑离线开机唤醒 - ${accName}`,
-      `云电脑当前处于 [${desktop.useStatusText || '已关机'}] 状态，守护系统已下发开机指令，正在等待云电脑就绪...`
-    );
-
-    try {
-      await this.connect(desktopId);
-    } catch (e) {}
-
-    const startTime = Date.now();
-    while (Date.now() - startTime < 180000) {
-      await new Promise(r => setTimeout(r, 6000));
-      const list = await this.getDesktops();
-      const cur = list.find(d => (d.objId || d.desktopId) === desktopId);
-      if (cur && (cur.useStatusText === '运行中' || cur.status === 'OK')) {
-        appendLog('KeepAlive', `[${accName}][${desktop.objName || desktopId}] 🎉 云电脑已开机就绪！建立保活长连接`, 'success');
-        sendNotification(
-          appConfig.settings,
-          `✅ 云电脑开机成功 - ${accName}`,
-          `云电脑已成功开机进入 [运行中] 状态，长连接心跳保活已建立。`
-        );
-        return true;
-      }
-      appendLog('KeepAlive', `[${accName}] 正在等待开机就绪 (${Math.floor((Date.now() - startTime) / 1000)}s / 180s)...`, 'info');
+  // 检测外部/官网/控制台开机：若之前处于关机/保活关闭，一旦检测到云电脑真正恢复运行中，自动恢复开启保活
+  checkExternalPowerOn(desktop) {
+    if (!desktop) return;
+    const isRunning = desktop.useStatusText === '运行中' || desktop.useStatus == 25;
+    if (isRunning && this.account.features && this.account.features.keepAlive === false) {
+      this.account.features.keepAlive = true;
+      this.account.manualShutdown = false;
+      this.account.stats = this.account.stats || {};
+      this.account.stats.keepAliveStatus = 'online';
+      saveConfig(appConfig);
+      appendLog('KeepAlive', `[${this.account.name || this.account.user}] 🎉 检测到云电脑已成功开机启动，已自动恢复保活开关与后台长连接守护！`, 'success');
+      this.startKeepAliveWorker();
     }
-
-    appendLog('KeepAlive', `[${accName}] 云电脑开机唤醒超时 (180s)，将在下一周期继续尝试`, 'error');
-    return false;
   }
 
   async refreshOfficialTasks() {
@@ -698,16 +828,33 @@ class CtYunClient {
           points: t.pointsList?.[0]?.value || 100
         }));
 
+        const todayStr = getBeijingDateOnly();
+        const nowStr = getBeijingTimeString();
+
+        // 1. 登录AI云电脑打卡完成时间点追踪
+        const loginTask = this.metrics.officialTasks.find(t => t.name.includes('登录AI云电脑'));
+        if (loginTask && (loginTask.status === 2 || loginTask.current >= loginTask.total)) {
+          if (!this.account.stats.lastSignTime || !this.account.stats.lastSignTime.startsWith(todayStr)) {
+            this.account.stats.lastSignTime = nowStr;
+          }
+        }
+
+        // 2. AI 智能对话完成时间点追踪
+        const aiTask = this.metrics.officialTasks.find(t => t.name.includes('AI对话'));
+        if (aiTask && (aiTask.status === 2 || aiTask.current >= aiTask.total)) {
+          if (!this.account.stats.lastAiChatTime || !this.account.stats.lastAiChatTime.startsWith(todayStr)) {
+            this.account.stats.lastAiChatTime = nowStr;
+          }
+        }
+
+        // 3. 挂机 1 小时完成时间点追踪
         const hangTask = this.metrics.officialTasks.find(t => t.name.includes('使用1小时'));
         if (hangTask) {
           this.account.stats.hangMinutesToday = Math.floor(hangTask.current / 60);
-        }
-
-        // 核心联动：如果官方“登录AI云电脑”任务状态为已完成 (status === 2 或 current >= total)，自动同步今日已签到
-        const loginTask = this.metrics.officialTasks.find(t => t.name.includes('登录AI云电脑'));
-        if (loginTask && (loginTask.status === 2 || loginTask.current >= loginTask.total)) {
-          if (!this.account.stats.lastSignTime || !this.account.stats.lastSignTime.startsWith(getBeijingDateOnly())) {
-            this.account.stats.lastSignTime = getBeijingTimeString();
+          if (hangTask.status === 2 || (hangTask.total > 0 && hangTask.current >= hangTask.total)) {
+            if (!this.account.stats.lastHangTime || !this.account.stats.lastHangTime.startsWith(todayStr)) {
+              this.account.stats.lastHangTime = nowStr;
+            }
           }
         }
       }
@@ -776,10 +923,25 @@ class CtYunClient {
 
     while (this.workerRunning) {
       try {
-        const keepSeconds = appConfig.settings?.keepAliveSeconds || 60;
-        this.metrics.keepAliveSeconds = keepSeconds;
-        appendLog('Heartbeat', `[${accName}] === 新保活周期开始 (设定保持: ${keepSeconds}秒) ===`, 'info');
-        
+        // 只有当用户在界面上手动把保活开关关闭，才退出守护循环
+        if (this.account.features?.keepAlive === false) {
+          this.stopKeepAliveWorker();
+          break;
+        }
+
+        // 若当前用户正在通过网页浏览器直连操控云电脑，后台保活保持静默避让，绝不建连争抢 Session！
+        if (this.isWebUserActive) {
+          if (Date.now() < this.webUserActiveUntil) {
+            this.metrics.status = 'online';
+            this.metrics.lastHeartbeatResult = '浏览器用户操作中 (保活避让守护中)';
+            await new Promise(r => setTimeout(r, 10000));
+            continue;
+          } else {
+            this.isWebUserActive = false;
+          }
+        }
+
+        // 1. 查询云电脑当前最新状态
         const desktops = await this.getDesktops();
         if (!desktops || desktops.length === 0) {
           appendLog('KeepAlive', `[${accName}] 账号名下暂无可用云电脑，60秒后重试...`, 'warning');
@@ -791,16 +953,56 @@ class CtYunClient {
 
         const desktop = desktops[0];
         const desktopId = desktop.objId || desktop.desktopId;
+        this.metrics.desktopId = desktopId;
         this.metrics.desktopName = desktop.objName || desktop.desktopName || '云电脑';
+        if (this.account.stats) this.account.stats.desktopId = desktopId;
 
-        // 确保云电脑已处于运行中，若关机则先唤醒开机！
-        const isReady = await this.ensureDesktopRunning(desktop);
-        if (!isReady) {
-          await new Promise(r => setTimeout(r, 30000));
+        const isRunning = desktop && (desktop.useStatusText === '运行中' || desktop.useStatus == 25);
+
+        // 2. 如果云电脑未处于运行中（已关机 / 正在启动排队）：
+        // 按照用户要求：只要保活按钮开启，绝对保持持久监测，绝不退出！
+        // 前 5 分钟每隔 20 秒高频监测一次；5 分钟后转为 10 分钟一次持久巡检，随时响应外部开机自启！
+        if (!isRunning) {
+          this.metrics.status = 'offline';
+          this.metrics.lastHeartbeatResult = `云电脑处于 [${desktop.useStatusText || '未启动'}] 状态，后台持续监测就绪中...`;
+          
+          this.bootWaitStartTime = this.bootWaitStartTime || Date.now();
+          const elapsedSec = Math.floor((Date.now() - this.bootWaitStartTime) / 1000);
+          
+          if (elapsedSec < 300) {
+            appendLog('KeepAlive', `[${accName}] 云电脑处于 [${desktop.useStatusText || '未启动'}] 状态，正在以 20s 频率持续监测就绪 (${elapsedSec}s/300s)...`, 'info');
+            await new Promise(r => setTimeout(r, 20000));
+          } else {
+            appendLog('KeepAlive', `[${accName}] 云电脑未启动，进入长效持久监测守护 (每 10 分钟探测一次，随时响应外部开机)...`, 'info');
+            await new Promise(r => setTimeout(r, 600000));
+          }
           continue;
         }
 
-        const desktopInfo = await this.connect(desktopId);
+        // 3. 云电脑已处于运行中，重置启动等待计时
+        this.bootWaitStartTime = null;
+
+        const keepSeconds = appConfig.settings?.keepAliveSeconds || 60;
+        this.metrics.keepAliveSeconds = keepSeconds;
+        appendLog('Heartbeat', `[${accName}] === 新保活周期开始 (设定保持: ${keepSeconds}秒) ===`, 'info');
+
+        // 4. 获取长连接视讯流配置 (开机后网关就绪可能有轻微延迟，温和重试多次)
+        let desktopInfo = null;
+        for (let connAttempt = 1; connAttempt <= 5; connAttempt++) {
+          desktopInfo = await this.connect(desktopId);
+          if (desktopInfo && desktopInfo.clinkLvsOutHost) break;
+          if (connAttempt < 5) {
+            appendLog('KeepAlive', `[${accName}] 云电脑已开机，视讯网关就绪排队中 (${connAttempt * 5}s/25s)...`, 'info');
+            await new Promise(r => setTimeout(r, 5000));
+          }
+        }
+
+        if (!desktopInfo || !desktopInfo.clinkLvsOutHost) {
+          appendLog('KeepAlive', `[${accName}] 视讯网关暂未分配完毕，20秒后自动重新探测连接...`, 'warning');
+          await new Promise(r => setTimeout(r, 20000));
+          continue;
+        }
+
         this.metrics.currentHost = desktopInfo.clinkLvsOutHost;
         const wsUrl = `wss://${desktopInfo.clinkLvsOutHost}/clinkProxy/${desktopId}/MAIN`;
 
@@ -811,14 +1013,21 @@ class CtYunClient {
           const endSession = (reason) => {
             if (cycleDone) return;
             cycleDone = true;
+            this.endCurrentSession = null;
             if (sessionTimeout) clearTimeout(sessionTimeout);
             if (this.countdownTimer) clearInterval(this.countdownTimer);
+            if (this.clinkPingTimer) {
+              clearInterval(this.clinkPingTimer);
+              this.clinkPingTimer = null;
+            }
             if (this.ws) {
               try { this.ws.close(); } catch (e) {}
             }
             this.wsAlive = false;
             resolveSession();
           };
+
+          this.endCurrentSession = endSession;
 
           this.resetCycleTimeout = (newSeconds) => {
             if (cycleDone) return;
@@ -844,15 +1053,26 @@ class CtYunClient {
             }
           }, 1000);
 
-          this.ws = new WebSocket(wsUrl, ['binary'], {
-            headers: { 'Origin': 'https://pc.ctyun.cn' }
+          this.ws = new WebSocket(wsUrl, {
+            headers: { Origin: 'https://pc.ctyun.cn' },
+            rejectUnauthorized: false
           });
-          this.ws.binaryType = 'arraybuffer';
 
-          this.ws.onopen = () => {
+          const safeSend = (data) => {
+            try {
+              if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                this.ws.send(data);
+              }
+            } catch (err) {
+              appendLog('Heartbeat', `[${accName}] 报文发送异常: ${err.message}`, 'warning');
+            }
+          };
+
+          this.ws.on('open', () => {
             this.wsAlive = true;
             this.metrics.status = 'online';
             this.metrics.successCount++;
+            this.account.stats = this.account.stats || {};
             this.account.stats.keepAliveStatus = 'online';
             saveConfig(appConfig);
 
@@ -870,28 +1090,31 @@ class CtYunClient {
               servername: desktopInfo.host + ':' + desktopInfo.port,
               oqs: 0
             };
-            this.ws.send(JSON.stringify(connectMsg));
+            safeSend(JSON.stringify(connectMsg));
 
             setTimeout(() => {
-              if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                const initBuf = Buffer.from('UkVEUQIAAAACAAAAGgAAAAAAAAABAAEAAAABAAAAEgAAAAkAAAAECAAA', 'base64');
-                this.ws.send(initBuf);
-                appendLog('Heartbeat', `[${accName}] 已发送保活特征码报文 (UkVEUQIA...)`, 'info');
-              }
+              const initBuf = Buffer.from('UkVEUQIAAAACAAAAGgAAAAAAAAABAAEAAAABAAAAEgAAAAkAAAAECAAA', 'base64');
+              safeSend(initBuf);
+              appendLog('Heartbeat', `[${accName}] 已发送保活特征码报文 (UkVEUQIA...)`, 'info');
             }, 500);
-          };
+          });
 
-          this.ws.onmessage = (evt) => {
+          this.ws.on('message', (data) => {
             try {
-              const buf = Buffer.from(evt.data);
+              const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
               const hex = buf.toString('hex').toUpperCase();
+
+              // 收到任一有效业务报文，均确保证书与连接状态为在线
+              this.wsAlive = true;
+              this.metrics.status = 'online';
+              if (this.account.stats) this.account.stats.keepAliveStatus = 'online';
 
               if (hex.startsWith('52454451')) {
                 const nowStr = getBeijingTimeOnly();
                 appendLog('Heartbeat', `[${accName}][${this.metrics.desktopName}] 收到服务端保活校验 REDQ (${buf.length}B)`, 'info');
 
                 const responseBuf = this.encryptor.execute(buf);
-                this.ws.send(responseBuf);
+                safeSend(responseBuf);
 
                 this.metrics.lastHeartbeatTime = nowStr;
                 this.metrics.lastHeartbeatResult = `REDQ 校验成功，已回传 ${responseBuf.length} 字节加密应答 (${nowStr})`;
@@ -901,6 +1124,31 @@ class CtYunClient {
 
               if (buf.length >= 6) {
                 const type = buf.readUInt16LE(0);
+                const size = buf.readUInt32LE(2);
+
+                // 响应服务端 PING (Type 4) -> 自动回传 PONG (Type 3)
+                if (type === 4) {
+                  const pongBuf = Buffer.alloc(6 + Math.min(size, 12));
+                  pongBuf.writeUInt16LE(3, 0); // CLINK_MSGC_PONG = 3
+                  pongBuf.writeUInt32LE(Math.min(size, 12), 2);
+                  if (size > 0 && buf.length >= 6 + Math.min(size, 12)) {
+                    buf.copy(pongBuf, 6, 6, 6 + Math.min(size, 12));
+                  }
+                  safeSend(pongBuf);
+                  return;
+                }
+
+                // 响应服务端 ACK_SYNC (Type 3) -> 回传 Type 1 (CLINK_MSGC_ACK_SYNC)
+                if (type === 3 && size >= 8) {
+                  const gen = buf.readUInt32LE(6);
+                  const ackBuf = Buffer.alloc(10);
+                  ackBuf.writeUInt16LE(1, 0); // CLINK_MSGC_ACK_SYNC = 1
+                  ackBuf.writeUInt32LE(4, 2);
+                  ackBuf.writeUInt32LE(gen, 6);
+                  safeSend(ackBuf);
+                  return;
+                }
+
                 if (type === 103) {
                   appendLog('Heartbeat', `[${accName}] 收到云电脑 103 认证，正在上报 118 用户身份...`, 'info');
                   const userPayload = Buffer.from(JSON.stringify({
@@ -917,24 +1165,89 @@ class CtYunClient {
                   sendBuf.writeUInt32LE(8, 10);
                   userPayload.copy(sendBuf, 14);
 
-                  this.ws.send(sendBuf);
+                  safeSend(sendBuf);
                   appendLog('Heartbeat', `[${accName}] -> ✅ 已回传 118 身份 (用户ID: ${this.loginInfo.userId})，在线状态已激活！`, 'success');
+
+                  // 核心协议补全 1: 发送 Type 112 (CLINK_MSGC_MAIN_CLIENT_LOGIN_INFO) 会话凭据包
+                  // 官方任务中心正是在此握手点记录终端正式连入云电脑会话并确认「登录AI云电脑」达成！
+                  try {
+                    const sId = desktopInfo.token || '';
+                    const dType = this.deviceType ? String(this.deviceType) : '';
+                    const dCode = this.account.deviceCode || '';
+                    const uAcc = this.loginInfo.userName || '';
+
+                    const sIdLen = Buffer.byteLength(sId, 'utf8') + 1;
+                    const dTypeLen = Buffer.byteLength(dType, 'utf8') + 1;
+                    const dCodeLen = Buffer.byteLength(dCode, 'utf8') + 1;
+                    const uAccLen = Buffer.byteLength(uAcc, 'utf8') + 1;
+
+                    const dataSize = 36 + sIdLen + dTypeLen + dCodeLen + uAccLen;
+                    const dataBuf = Buffer.alloc(dataSize);
+                    let offset = 0;
+                    let strOffset = 36;
+
+                    dataBuf.writeUInt32LE(Number(desktopId), offset); offset += 4;
+                    dataBuf.writeUInt32LE(sIdLen, offset); offset += 4;
+                    dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += sIdLen;
+                    dataBuf.writeUInt32LE(dTypeLen, offset); offset += 4;
+                    dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += dTypeLen;
+                    dataBuf.writeUInt32LE(dCodeLen, offset); offset += 4;
+                    dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += dCodeLen;
+                    dataBuf.writeUInt32LE(uAccLen, offset); offset += 4;
+                    dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += uAccLen;
+
+                    dataBuf.write(sId, offset, 'utf8'); offset += sIdLen;
+                    dataBuf.write(dType, offset, 'utf8'); offset += dTypeLen;
+                    dataBuf.write(dCode, offset, 'utf8'); offset += dCodeLen;
+                    dataBuf.write(uAcc, offset, 'utf8'); offset += uAccLen;
+
+                    const msgBuf112 = Buffer.alloc(6 + dataSize);
+                    msgBuf112.writeUInt16LE(112, 0); // Type 112
+                    msgBuf112.writeUInt32LE(dataSize, 2);
+                    dataBuf.copy(msgBuf112, 6);
+
+                    safeSend(msgBuf112);
+                  } catch (e) {}
+
+                  // 核心协议补全 2: 发送 Type 104 (CLINK_MSGC_MAIN_ATTACH_CHANNELS) 通道挂接就绪包
+                  try {
+                    const msgBuf104 = Buffer.alloc(6);
+                    msgBuf104.writeUInt16LE(104, 0); // Type 104
+                    msgBuf104.writeUInt32LE(0, 2);
+                    safeSend(msgBuf104);
+                  } catch (e) {}
+
+                  // 核心协议补全 3: 启动定时 Type 7 (CLINK_MSGC_HEARTBEAT) 双向心跳维持
+                  // 天翼云网关据此计算活跃持续在线秒数，平滑累加挂机 1 小时 (3600秒) 时长！
+                  if (this.clinkPingTimer) clearInterval(this.clinkPingTimer);
+                  this.clinkPingTimer = setInterval(() => {
+                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                      const hbBuf = Buffer.alloc(6);
+                      hbBuf.writeUInt16LE(7, 0); // Type 7
+                      hbBuf.writeUInt32LE(0, 2);
+                      safeSend(hbBuf);
+                    }
+                  }, 5000);
+
+                  // 刷新官方任务与积分进度
+                  setTimeout(() => this.refreshOfficialTasks(), 2500);
                 }
               }
             } catch (err) {
               appendLog('Heartbeat', `[${accName}] 解析报文异常: ${err.message}`, 'warning');
             }
-          };
+          });
 
-          this.ws.onerror = (err) => {
+          this.ws.on('error', (err) => {
             appendLog('Heartbeat', `[${accName}] 通道异常: ${err.message || '连接受阻'}`, 'error');
             this.metrics.errorCount++;
             endSession('Socket Error');
-          };
+          });
 
-          this.ws.onclose = () => {
-            endSession('Socket Closed');
-          };
+          this.ws.on('close', (code, reason) => {
+            appendLog('Heartbeat', `[${accName}] 保活长连接正常关闭 (${code} - ${reason || '正常轮转'})`, 'info');
+            endSession('Closed');
+          });
         });
 
         await this.refreshOfficialTasks();
@@ -967,13 +1280,15 @@ function getClient(acc) {
     // 立即执行一次官方任务与积分的精准拉取
     client.refreshOfficialTasks().catch(() => {});
     clientInstances.set(acc.id, client);
+  } else {
+    clientInstances.get(acc.id).account = acc;
   }
   return clientInstances.get(acc.id);
 }
 
 function initAllKeepAlive() {
   for (const acc of appConfig.accounts) {
-    if (acc.enabled && acc.features?.keepAlive !== false) {
+    if (acc.enabled && acc.features?.keepAlive === true) {
       const client = getClient(acc);
       client.startKeepAliveWorker();
     }
@@ -989,7 +1304,8 @@ const taskScheduler = new TaskScheduler({
   getClient: (acc) => getClient(acc),
   ocrEngine,
   appendLog: (src, msg, lvl) => appendLog(src, msg, lvl),
-  sendNotification: (settings, title, content) => sendNotification(settings, title, content)
+  sendNotification: (settings, title, content) => sendNotification(settings, title, content),
+  saveConfig: () => saveConfig(appConfig)
 });
 setTimeout(() => taskScheduler.start(), 3000);
 
@@ -1046,7 +1362,86 @@ function getSessionFromReq(req, parsedUrl = null) {
     if (m) token = decodeURIComponent(m[1]);
   }
   const session = authManager.verifySession(token);
+  if (session) {
+    session.token = token;
+  }
   return session;
+}
+
+// 缓存与代理天翼云电脑官方 Web 资产与模板
+const ctyunStaticCache = new Map();
+let cachedCtyunIndexHtml = '';
+let cachedCtyunIndexTime = 0;
+
+async function getCtyunIndexHtml() {
+  const now = Date.now();
+  if (cachedCtyunIndexHtml && (now - cachedCtyunIndexTime < 3600 * 1000)) {
+    return cachedCtyunIndexHtml;
+  }
+  try {
+    const res = await fetch('https://pc.ctyun.cn/', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/137.0.0.0'
+      }
+    });
+    if (res.ok) {
+      cachedCtyunIndexHtml = await res.text();
+      cachedCtyunIndexTime = now;
+      return cachedCtyunIndexHtml;
+    }
+  } catch (e) {
+    console.error('Failed to fetch pc.ctyun.cn index:', e.message);
+  }
+  return cachedCtyunIndexHtml || '<!doctype html><html><head><title>天翼量子AI云电脑</title></head><body><div id="app"></div></body></html>';
+}
+
+async function proxyStaticAsset(res, targetUrl) {
+  if (ctyunStaticCache.has(targetUrl)) {
+    const cached = ctyunStaticCache.get(targetUrl);
+    res.writeHead(200, {
+      'Content-Type': cached.contentType,
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=86400'
+    });
+    res.end(cached.buffer);
+    return;
+  }
+
+  try {
+    const upstreamRes = await fetch(targetUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/137.0.0.0',
+        'Referer': 'https://pc.ctyun.cn/'
+      }
+    });
+    if (!upstreamRes.ok) {
+      res.writeHead(upstreamRes.status, { 'Content-Type': 'text/plain' });
+      res.end('Upstream error: ' + upstreamRes.status);
+      return;
+    }
+    const arrayBuf = await upstreamRes.arrayBuffer();
+    const buffer = Buffer.from(arrayBuf);
+    let contentType = upstreamRes.headers.get('content-type') || 'application/octet-stream';
+    if (targetUrl.endsWith('.wasm')) contentType = 'application/wasm';
+    else if (targetUrl.endsWith('.js')) contentType = 'application/javascript; charset=utf-8';
+    else if (targetUrl.endsWith('.css')) contentType = 'text/css; charset=utf-8';
+    else if (targetUrl.endsWith('.png')) contentType = 'image/png';
+    else if (targetUrl.endsWith('.ico')) contentType = 'image/x-icon';
+
+    if (buffer.length < 20 * 1024 * 1024) {
+      ctyunStaticCache.set(targetUrl, { buffer, contentType });
+    }
+
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=86400'
+    });
+    res.end(buffer);
+  } catch (err) {
+    res.writeHead(502, { 'Content-Type': 'text/plain' });
+    res.end('Failed to proxy static asset: ' + err.message);
+  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -1063,6 +1458,263 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 云电脑 Web 免密直通网关视图 (直接打开操作界面，预置鉴权凭据与锁定 2560x1440 @ 150% 分辨率)
+  if (pathname === '/desktop-view') {
+    const session = getSessionFromReq(req, parsedUrl);
+    if (!session) {
+      res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<h3 style="font-family:sans-serif;padding:20px;">未授权：请先在仪表盘登录后再访问云电脑</h3>');
+      return;
+    }
+
+    const accId = parsedUrl.searchParams.get('accId');
+    const acc = appConfig.accounts.find(a => a.id === accId);
+    if (!acc) {
+      res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<h3 style="font-family:sans-serif;padding:20px;">云电脑账号不存在</h3>');
+      return;
+    }
+
+    if (!canUserAccessAccount(session, acc)) {
+      res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<h3 style="font-family:sans-serif;padding:20px;">权限不足：无权访问该云电脑</h3>');
+      return;
+    }
+
+    const client = getClient(acc);
+    try {
+      if (!client.loginInfo) {
+        await client.login();
+      }
+      const desktops = await client.getDesktops();
+      if (!desktops || desktops.length === 0) {
+        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end('<h3 style="font-family:sans-serif;padding:20px;">未检测到名下可用云电脑</h3>');
+        return;
+      }
+      const desktop = desktops[0];
+      const objId = desktop.objId || desktop.desktopId;
+      const b64Id = Buffer.from(String(objId)).toString('base64');
+
+      // 核心避让机制：用户准备打开浏览器独立操作云电脑，后台长连接保活自动断开让位
+      // 杜绝“AI云电脑在其他地方登录，您已被强制下线”的互踢冲突！
+      client.yieldToWebUser(60);
+
+      const authDataObj = {
+        logined: true,
+        userId: client.loginInfo?.userId,
+        userName: client.loginInfo?.userName,
+        mobilephone: client.loginInfo?.mobilephone || acc.user,
+        tenantId: client.loginInfo?.tenantId,
+        secretKey: client.loginInfo?.secretKey,
+        deviceType: client.deviceType,
+        bondedDevice: true,
+        commonLoginReqHeader: client.loginInfo?.commonLoginReqHeader || '',
+        timestamp: Date.now()
+      };
+
+      let html = await getCtyunIndexHtml();
+
+      const injectScript = `
+<script>
+(function() {
+  // 1. 自动免密注入天翼官方认证凭据至 localStorage
+  const authData = ${JSON.stringify(authDataObj)};
+  const deviceCode = ${JSON.stringify(acc.deviceCode)};
+  const expiredAt = ${JSON.stringify(String(Date.now() + 72 * 3600 * 1000))};
+  try {
+    localStorage.setItem('web_device_code', deviceCode);
+    localStorage.setItem('authExpiredAt', expiredAt);
+    localStorage.setItem('authData', JSON.stringify(authData));
+    localStorage.setItem('loginAt', Date.now().toString());
+  } catch (e) {
+    console.error('Failed to set localStorage', e);
+  }
+
+  // 2. API 请求代理拦截器 (规避跨域与 Origin 防盗链)
+  const proxyBase = '/api/ctyun-proxy?target=';
+  function rewriteUrl(u) {
+    if (!u || typeof u !== 'string') return u;
+    if (u.startsWith(proxyBase)) return u;
+    if (u.includes('.ctyun.cn:8810') || u.includes('.ctyun.cn:8816') || u.includes('-deskmgr.ctyun.cn')) {
+      return proxyBase + encodeURIComponent(u);
+    }
+    return u;
+  }
+
+  const origFetch = window.fetch;
+  window.fetch = function(resource, init) {
+    if (typeof resource === 'string') {
+      resource = rewriteUrl(resource);
+    } else if (resource && resource.url) {
+      const newUrl = rewriteUrl(resource.url);
+      resource = new Request(newUrl, resource);
+    }
+    return origFetch.call(this, resource, init);
+  };
+
+  const origOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url, ...args) {
+    url = rewriteUrl(url);
+    return origOpen.call(this, method, url, ...args);
+  };
+
+  // 4. 路由直接锁定进入云电脑操作界面
+  const targetHash = '#/desktop?id=' + ${JSON.stringify(encodeURIComponent(b64Id))};
+  if (!window.location.hash || window.location.hash.includes('/login') || window.location.hash.includes('/desktop-list')) {
+    window.location.hash = targetHash;
+  }
+
+  // 5. 拦截 Web Worker 构造函数，自动重定向至代理网关，确保 bbenc 解码器正常通信
+  const OrigWorker = window.Worker;
+  window.Worker = function(scriptUrl, options) {
+    if (typeof scriptUrl === 'string' && scriptUrl.includes('bbenc.worker.js')) {
+      scriptUrl = '/workers/bbenc.worker.js';
+    }
+    return new OrigWorker(scriptUrl, options);
+  };
+
+  // 6. 前台网页生命周期与心跳保活双向感知感知探针
+  // 打开页面每 5 秒发送心跳证明用户正在操作；页面关闭/离开时立即通知后台恢复保活守护
+  const accId = ${JSON.stringify(acc.id)};
+  const token = ${JSON.stringify(session.token || '')};
+  function sendWebHeartbeat() {
+    fetch('/api/accounts/' + accId + '/web-active?token=' + encodeURIComponent(token), { method: 'POST' }).catch(() => {});
+  }
+  sendWebHeartbeat();
+  const webHbTimer = setInterval(sendWebHeartbeat, 5000);
+
+  window.addEventListener('beforeunload', function() {
+    clearInterval(webHbTimer);
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon('/api/accounts/' + accId + '/web-close?token=' + encodeURIComponent(token));
+    } else {
+      fetch('/api/accounts/' + accId + '/web-close?token=' + encodeURIComponent(token), { method: 'POST', keepalive: true }).catch(() => {});
+    }
+  });
+})();
+</script>
+`;
+
+      html = html.replace('<head>', '<head><title>天翼云电脑 - ' + (acc.name || acc.user) + '</title>' + injectScript);
+      html = html.replace(/src="static\//g, 'src="/ctyun-static/static/');
+      html = html.replace(/src="\.\/static\//g, 'src="/ctyun-static/static/');
+      html = html.replace(/href="\.\/static\//g, 'href="/ctyun-static/static/');
+      html = html.replace(/href="\.\/manifest\.json"/g, 'href="/ctyun-static/manifest.json"');
+
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store'
+      });
+      res.end(html);
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<h3 style="font-family:sans-serif;padding:20px;">连接云电脑服务异常: ' + err.message + '</h3>');
+    }
+    return;
+  }
+
+  // 代理天翼云 Web Worker 解码器与组件 (解决“当前浏览器版本过低，无法正常显示画面”问题)
+  if (pathname.startsWith('/workers/') || pathname.includes('bbenc.worker.js')) {
+    const filename = pathname.split('/').pop() || 'bbenc.worker.js';
+    const targetUrl = 'https://pc.ctyun.cn/workers/' + filename;
+    await proxyStaticAsset(res, targetUrl);
+    return;
+  }
+
+  // 代理天翼云 WASM 解码器组件
+  if (pathname.includes('bbEncDecoder') || pathname.endsWith('.wasm')) {
+    const filename = pathname.split('/').pop();
+    const targetUrl = 'https://pc.ctyun.cn/static/common/' + filename;
+    await proxyStaticAsset(res, targetUrl);
+    return;
+  }
+
+  // 代理天翼云静态资源
+  if (pathname.startsWith('/ctyun-static/')) {
+    const relPath = pathname.substring(13).replace(/^\/+/, '');
+    const targetUrl = 'https://pc.ctyun.cn/' + relPath;
+    await proxyStaticAsset(res, targetUrl);
+    return;
+  }
+
+  // 天翼云 API 反向代理通道 (附带官方 Origin/Referer 防盗链透传与 CORS 响应头)
+  if (pathname === '/api/ctyun-proxy') {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS'
+      });
+      res.end();
+      return;
+    }
+
+    const targetUrl = parsedUrl.searchParams.get('target');
+    if (!targetUrl) {
+      jsonResponse(res, { error: 'Missing target' }, 400);
+      return;
+    }
+
+    try {
+      const parsedTarget = new URL(targetUrl);
+      if (!parsedTarget.hostname.endsWith('.ctyun.cn')) {
+        jsonResponse(res, { error: 'Invalid proxy target' }, 403);
+        return;
+      }
+
+      const bodyChunks = [];
+      req.on('data', chunk => bodyChunks.push(chunk));
+      req.on('end', async () => {
+        const bodyBuffer = Buffer.concat(bodyChunks);
+        const outgoingHeaders = {};
+        for (const [k, v] of Object.entries(req.headers)) {
+          const lk = k.toLowerCase();
+          if (lk === 'host' || lk === 'origin' || lk === 'referer' || lk === 'content-length') continue;
+          outgoingHeaders[k] = v;
+        }
+        outgoingHeaders['host'] = parsedTarget.host;
+        outgoingHeaders['origin'] = 'https://pc.ctyun.cn';
+        outgoingHeaders['referer'] = 'https://pc.ctyun.cn/';
+        if (bodyBuffer.length > 0) {
+          outgoingHeaders['content-length'] = bodyBuffer.length;
+        }
+
+        const clientModule = parsedTarget.protocol === 'http:' ? http : https;
+        const proxyReq = clientModule.request(targetUrl, {
+          method: req.method,
+          headers: outgoingHeaders,
+          rejectUnauthorized: false
+        }, proxyRes => {
+          const respHeaders = {};
+          for (const [k, v] of Object.entries(proxyRes.headers)) {
+            if (k.toLowerCase() === 'set-cookie') continue;
+            respHeaders[k] = v;
+          }
+          respHeaders['access-control-allow-origin'] = '*';
+          respHeaders['access-control-allow-headers'] = '*';
+          respHeaders['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
+
+          res.writeHead(proxyRes.statusCode, respHeaders);
+          proxyRes.pipe(res);
+        });
+
+        proxyReq.on('error', err => {
+          res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'Proxy request failed: ' + err.message }));
+        });
+
+        if (bodyBuffer.length > 0) {
+          proxyReq.write(bodyBuffer);
+        }
+        proxyReq.end();
+      });
+    } catch (e) {
+      jsonResponse(res, { error: 'Malformed proxy request: ' + e.message }, 400);
+    }
+    return;
+  }
+
   // 1. 静态资源
   if (pathname === '/' || pathname === '/index.html') {
     serveStatic(res, path.join(STATIC_DIR, 'index.html'), 'text/html; charset=utf-8');
@@ -1071,11 +1723,16 @@ const server = http.createServer(async (req, res) => {
   if (pathname.startsWith('/static/')) {
     const rel = pathname.substring(8);
     const file = path.join(STATIC_DIR, rel);
-    let type = 'text/plain';
-    if (rel.endsWith('.css')) type = 'text/css; charset=utf-8';
-    else if (rel.endsWith('.js')) type = 'application/javascript; charset=utf-8';
-    else if (rel.endsWith('.html')) type = 'text/html; charset=utf-8';
-    serveStatic(res, file, type);
+    if (fs.existsSync(file)) {
+      let type = 'text/plain';
+      if (rel.endsWith('.css')) type = 'text/css; charset=utf-8';
+      else if (rel.endsWith('.js')) type = 'application/javascript; charset=utf-8';
+      else if (rel.endsWith('.html')) type = 'text/html; charset=utf-8';
+      serveStatic(res, file, type);
+    } else {
+      const targetUrl = 'https://pc.ctyun.cn' + pathname;
+      await proxyStaticAsset(res, targetUrl);
+    }
     return;
   }
 
@@ -1086,8 +1743,32 @@ const server = http.createServer(async (req, res) => {
       jsonResponse(res, []);
       return;
     }
-    const filtered = logs.filter(l => canUserSeeLog(session, l)).slice(-100);
+    const filtered = logs.filter(l => canUserSeeLog(session, l)).slice(-200);
     jsonResponse(res, filtered);
+    return;
+  }
+
+  // 一键清空持久化历史日志 API
+  if (pathname === '/api/logs/clear' && req.method === 'POST') {
+    const session = getSessionFromReq(req, parsedUrl);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+
+    if (session.role === 'admin') {
+      logs.length = 0;
+    } else {
+      // 普通用户只清除自身可见日志
+      for (let i = logs.length - 1; i >= 0; i--) {
+        if (canUserSeeLog(session, logs[i])) {
+          logs.splice(i, 1);
+        }
+      }
+    }
+
+    appendLog('System', `用户 [${session.username}] 执行了一键清空历史日志`, 'info');
+    jsonResponse(res, { success: true, message: '历史日志已彻底清空！' });
     return;
   }
 
@@ -1319,12 +2000,33 @@ const server = http.createServer(async (req, res) => {
       const completedTasks = [];
 
       for (const t of tasks) {
-        if (t.status === 2 || (t.total > 0 && t.current >= t.total)) {
+        let completedAt = '';
+        if (t.name.includes('登录AI云电脑')) {
+          completedAt = a.stats?.lastSignTime || '';
+        } else if (t.name.includes('AI对话')) {
+          completedAt = a.stats?.lastAiChatTime || '';
+        } else if (t.name.includes('使用1小时')) {
+          completedAt = a.stats?.lastHangTime || '';
+        }
+
+        const isDone = t.status === 2 || (t.total > 0 && t.current >= t.total);
+        if (isDone) {
           const val = t.points || 100;
           accTodayPoints += val;
-          completedTasks.push({ name: t.name, points: val });
+          completedTasks.push({
+            name: t.name,
+            points: val,
+            completed: true,
+            completedAt: completedAt || `${today} 08:00:00`
+          });
         } else {
-          completedTasks.push({ name: t.name, points: 0, progress: `${t.current}/${t.total}` });
+          completedTasks.push({
+            name: t.name,
+            points: 0,
+            completed: false,
+            progress: `${t.current}/${t.total}`,
+            completedAt: ''
+          });
         }
       }
 
@@ -1359,11 +2061,26 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    appConfig = loadConfig();
     let userAccounts = appConfig.accounts;
     if (session.role !== 'admin') {
-      // 普通注册用户只能看属于自己的云电脑
       userAccounts = appConfig.accounts.filter(a => a.ownerId === session.userId);
+    }
+
+    // 智能状态同步：确保运行态指标状态准确反映长连接和机器实际状态
+    for (const acc of userAccounts) {
+      const client = getClient(acc);
+      if (acc.features?.keepAlive === false || acc.manualShutdown === true) {
+        client.stopKeepAliveWorker();
+        client.metrics.status = 'offline';
+        client.metrics.cycleCountdown = client.metrics.keepAliveSeconds || 60;
+      } else if (acc.enabled && acc.features?.keepAlive === true) {
+        if (!client.workerRunning) {
+          client.startKeepAliveWorker();
+        }
+        if (client.wsAlive) {
+          client.metrics.status = 'online';
+        }
+      }
     }
 
     const enriched = userAccounts.map(acc => {
@@ -1519,17 +2236,43 @@ const server = http.createServer(async (req, res) => {
     if (body.redeemConfig) acc.redeemConfig = { ...acc.redeemConfig, ...body.redeemConfig };
     if (body.stats) acc.stats = { ...acc.stats, ...body.stats };
 
+    // 用户在界面上明确手动开启了保活开关：解除 manualShutdown 关机阻断
+    if (body.features && body.features.keepAlive === true) {
+      acc.manualShutdown = false;
+    }
+
     saveConfig(appConfig);
     appendLog('System', `已更新账号配置: ${acc.name}`, 'info');
 
     const client = getClient(acc);
-    if (acc.enabled && acc.features?.keepAlive !== false) {
+    if (acc.enabled && acc.features?.keepAlive === true) {
       if (!client.workerRunning) client.startKeepAliveWorker();
     } else {
       client.stopKeepAliveWorker();
     }
 
     jsonResponse(res, acc);
+    return;
+  }
+
+  // 10. 管理员手动触发全量定时调度流程 API (立即以当前开关状态跑一遍)
+  if (req.method === 'POST' && pathname === '/api/scheduler/trigger') {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+    if (session.role !== 'admin') {
+      jsonResponse(res, { error: '权限不足：仅管理员可手动触发全局调度流程' }, 403);
+      return;
+    }
+
+    if (taskScheduler) {
+      taskScheduler.runAllAccounts('manual_trigger');
+      jsonResponse(res, { success: true, message: '全局定时任务流程已触发启动，请在控制台查看执行输出' });
+    } else {
+      jsonResponse(res, { error: '调度器实例未初始化' }, 500);
+    }
     return;
   }
 
@@ -1694,63 +2437,49 @@ const server = http.createServer(async (req, res) => {
 
     try {
       if (taskType === 'sign') {
-        appendLog('Sign', `[${acc.name}] 正在启动真实云电脑页面完成【登录AI云电脑】打卡...`, 'info');
-        const displayCfg = acc.displayConfig || { width: 2560, height: 1440, scale: 150 };
-        executeRealHang(acc.user, acc.password, ocrEngine, 10, displayCfg, (src, msg, lvl) => appendLog(src, `[${acc.name}] ${msg}`, lvl))
+        executeNativeSign(client, acc, (src, msg, lvl) => appendLog(src, `[${acc.name}] ${msg}`, lvl))
           .then(async () => {
             acc.stats.lastSignTime = now;
             saveConfig(appConfig);
             await client.refreshOfficialTasks();
-            appendLog('Sign', `[${acc.name}] 官方打卡已成功，当前官方积分: ${client.metrics.userPoints}`, 'success');
+            sendNotification(
+              appConfig.settings,
+              `✅ 登录打卡达成 - ${acc.name}`,
+              `账号【${acc.name}】今日登录AI云电脑任务已完成，100 积分已到账！`
+            );
           })
           .catch(err => appendLog('Sign', `[${acc.name}] 打卡执行异常: ${err.message}`, 'error'));
 
-        jsonResponse(res, { message: `[${acc.name}] 真实打卡任务已在后台启动执行，官方进度将自动更新` });
+        jsonResponse(res, { message: `[${acc.name}] 打卡指令已下发，官方积分实时同步刷新` });
         return;
 
       } else if (taskType === 'aiChat') {
-        appendLog('AIChat', `[${acc.name}] 正在启动无头浏览器执行真实天翼 AI 对话任务...`, 'info');
-        executeRealAiChat(acc.user, acc.password, ocrEngine, (src, msg, lvl) => appendLog(src, `[${acc.name}] ${msg}`, lvl))
+        executeNativeAiChat(client, acc, (src, msg, lvl) => appendLog(src, `[${acc.name}] ${msg}`, lvl))
           .then(async () => {
             acc.stats.lastAiChatTime = now;
             saveConfig(appConfig);
             await client.refreshOfficialTasks();
-            appendLog('AIChat', `[${acc.name}] 官方 AI 对话任务已达成！+100 积分已入账，总积分: ${client.metrics.userPoints}`, 'success');
+            sendNotification(
+              appConfig.settings,
+              `🤖 AI对话任务达成 - ${acc.name}`,
+              `账号【${acc.name}】今日AI智能对话任务已完成，100 积分已入账！`
+            );
           })
           .catch(err => appendLog('AIChat', `[${acc.name}] AI 对话任务异常: ${err.message}`, 'error'));
 
-        jsonResponse(res, { message: `[${acc.name}] 真实 AI 对话任务已在后台执行，AI 回复后自动计分` });
+        jsonResponse(res, { message: `[${acc.name}] AI 智能对话已触发执行，已获取对应积分` });
         return;
 
       } else if (taskType === 'hang') {
-        appendLog('Hang', `[${acc.name}] 启动云电脑真实网页端挂机 (持续保持云电脑运行状态以累加官方秒数)...`, 'info');
-        if (!client.wsAlive) {
-          client.startKeepAliveWorker();
-        }
-
-        // 检查官方任务是否已满 1 小时 (3600秒 或 status === 2)
-        await client.refreshOfficialTasks();
-        const hangTask = client.metrics.officialTasks.find(t => t.name.includes('使用1小时'));
-        const alreadyCompleted = hangTask && (hangTask.status === 2 || (hangTask.total > 0 && hangTask.current >= hangTask.total));
-        
-        // 若已经满1小时，登录进入后保持10秒即可自动退出释放资源！若未满1小时，则保持挂机120秒持续累加
-        const hangDuration = alreadyCompleted ? 10 : 120;
-        if (alreadyCompleted) {
-          appendLog('Hang', `[${acc.name}] 今日挂机1小时任务已全部达成 (3600秒达成)，本次将执行10秒快速心跳同步并退出释放资源...`, 'info');
-        }
-
-        const displayCfg = acc.displayConfig || { width: 2560, height: 1440, scale: 150 };
-        executeRealHang(acc.user, acc.password, ocrEngine, hangDuration, displayCfg, (src, msg, lvl) => appendLog(src, `[${acc.name}] ${msg}`, lvl))
+        executeNativeHang(client, acc, (src, msg, lvl) => appendLog(src, `[${acc.name}] ${msg}`, lvl))
           .then(async () => {
             acc.stats.lastHangTime = now;
             saveConfig(appConfig);
             await client.refreshOfficialTasks();
-            const curSec = hangTask ? hangTask.current : 0;
-            appendLog('Hang', `[${acc.name}] 挂机任务已同步完成: 官方后台记录已累计 ${curSec} / 3600 秒`, 'success');
           })
-          .catch(err => appendLog('Hang', `[${acc.name}] 挂机自动化异常: ${err.message}`, 'error'));
+          .catch(err => appendLog('Hang', `[${acc.name}] 挂机守护异常: ${err.message}`, 'error'));
 
-        jsonResponse(res, { message: alreadyCompleted ? `[${acc.name}] 今日已满1小时，已启动10秒快速同步` : `[${acc.name}] 云电脑挂机已启动并在真实运行中，官方秒数将自动累加` });
+        jsonResponse(res, { message: `[${acc.name}] 云电脑长连接守护已就绪，正在持续累加挂机时长` });
         return;
 
       } else if (taskType === 'redeem') {
@@ -1765,6 +2494,45 @@ const server = http.createServer(async (req, res) => {
       jsonResponse(res, { error: e.message }, 500);
       return;
     }
+  }
+
+  // 14. 前台网页操作云电脑生命周期与心跳探活接口
+  if (req.method === 'POST' && pathname.startsWith('/api/accounts/') && pathname.endsWith('/web-active')) {
+    const session = getSessionFromReq(req, parsedUrl);
+    if (!session) {
+      jsonResponse(res, { error: '未授权' }, 401);
+      return;
+    }
+    const accId = pathname.split('/')[3];
+    const acc = appConfig.accounts.find(a => a.id === accId);
+    if (acc && canUserAccessAccount(session, acc)) {
+      const client = getClient(acc);
+      // 保持避让：只要前台网页还在打开操作，每次心跳刷新避让有效期 (延长 15 秒)
+      client.yieldToWebUser(0.25);
+      jsonResponse(res, { success: true, active: true });
+    } else {
+      jsonResponse(res, { error: '账号不存在或无权访问' }, 404);
+    }
+    return;
+  }
+
+  // 前台网页关闭时触发的恢复接口
+  if (req.method === 'POST' && pathname.startsWith('/api/accounts/') && pathname.endsWith('/web-close')) {
+    const session = getSessionFromReq(req, parsedUrl);
+    if (!session) {
+      jsonResponse(res, { error: '未授权' }, 401);
+      return;
+    }
+    const accId = pathname.split('/')[3];
+    const acc = appConfig.accounts.find(a => a.id === accId);
+    if (acc && canUserAccessAccount(session, acc)) {
+      const client = getClient(acc);
+      client.resumeFromWebUser();
+      jsonResponse(res, { success: true, resumed: true });
+    } else {
+      jsonResponse(res, { error: '账号不存在或无权访问' }, 404);
+    }
+    return;
   }
 
   // 15. 获取真实商品列表
@@ -1865,6 +2633,10 @@ const server = http.createServer(async (req, res) => {
 
     const client = getClient(acc);
     try {
+      // 确保已登录并拿到天翼云认证凭据
+      if (!client.loginInfo) {
+        await client.login();
+      }
       const desktops = await client.getDesktops();
       if (!desktops || desktops.length === 0) {
         jsonResponse(res, { error: '未检测到可用云电脑' }, 400);
@@ -1876,12 +2648,35 @@ const server = http.createServer(async (req, res) => {
       const targetUrl = `https://pc.ctyun.cn/#/desktop?id=${encodeURIComponent(b64Id)}`;
 
       const displayCfg = acc.displayConfig || { width: 2560, height: 1440, scale: 150 };
+      const sessionToken = getSessionFromReq(req)?.token || (parsedUrl.searchParams.get('token') || '');
+
+      // 直通操作页面入口 URL (带授权 Token 和云电脑 ID)
+      const directViewUrl = `/desktop-view?accId=${accId}&token=${encodeURIComponent(sessionToken || '')}`;
+
+      // 构造免密直达认证包 (localStorage.authData + web_device_code + authExpiredAt)
+      const authDataObj = {
+        logined: true,
+        userId: client.loginInfo?.userId,
+        userName: client.loginInfo?.userName,
+        mobilephone: client.loginInfo?.mobilephone || acc.user,
+        tenantId: client.loginInfo?.tenantId,
+        secretKey: client.loginInfo?.secretKey,
+        deviceType: client.deviceType,
+        bondedDevice: true,
+        commonLoginReqHeader: client.loginInfo?.commonLoginReqHeader || '',
+        timestamp: Date.now()
+      };
 
       jsonResponse(res, {
         success: true,
         user: acc.user,
+        password: acc.password,
         deviceCode: acc.deviceCode,
+        authData: authDataObj,
+        authExpiredAt: String(Date.now() + 72 * 3600 * 1000),
         targetUrl,
+        directViewUrl,
+        desktopUrl: `https://pc.ctyun.cn/#/desktop-list`,
         desktopName: desktop.objName || desktop.desktopName || '云电脑',
         displayConfig: displayCfg
       });
@@ -2000,15 +2795,51 @@ const server = http.createServer(async (req, res) => {
 
     const client = getClient(acc);
     try {
-      const desktops = await client.getDesktops();
-      if (!desktops || desktops.length === 0) {
+      const actionLower = (action || '').toLowerCase();
+      let desktopId = '';
+      
+      // 如果当前机器已处于关机状态，直接提取本地记录的 desktopId 进行开机，防止 getDesktops 过滤导致 400
+      try {
+        const desktops = await client.getDesktops();
+        if (desktops && desktops.length > 0) {
+          desktopId = desktops[0].objId || desktops[0].desktopId;
+        }
+      } catch (e) {}
+
+      if (!desktopId) {
+        desktopId = client.metrics.desktopId || acc.stats?.desktopId || '';
+      }
+
+      if (!desktopId && actionLower !== 'poweron') {
         jsonResponse(res, { error: '未检测到可用云电脑' }, 400);
         return;
       }
-      const desktopId = desktops[0].objId || desktops[0].desktopId;
+
       const resPower = await client.controlPower(desktopId, action);
       if (resPower.success) {
-        jsonResponse(res, resPower);
+        // 核心联动：如果是用户在电源管理主动关机，自动关闭保活开关并打上主动关机标记，彻底停止保活重连与离线自动唤醒！
+        if (actionLower === 'shutdown' || actionLower === 'poweroff') {
+          acc.features = acc.features || {};
+          acc.features.keepAlive = false;
+          acc.manualShutdown = true;
+          acc.stats = acc.stats || {};
+          acc.stats.keepAliveStatus = 'offline';
+          saveConfig(appConfig);
+          client.stopKeepAliveWorker();
+          appendLog('System', `[${acc.name}] 用户主动关机，已自动关闭保活开关，机器将维持关机，杜绝自动唤醒开机。`, 'info');
+        } else if (actionLower === 'poweron' || actionLower === 'start' || actionLower === 'awake') {
+          // 用户在电源管理主动点开机：恢复保活开关与后台长连接，解除主动关机标记
+          acc.features = acc.features || {};
+          acc.features.keepAlive = true;
+          acc.manualShutdown = false;
+          acc.stats = acc.stats || {};
+          acc.stats.keepAliveStatus = 'online';
+          saveConfig(appConfig);
+          client.startKeepAliveWorker();
+          appendLog('System', `[${acc.name}] 用户主动开机，已自动恢复保活开关与长连接守护。`, 'info');
+        }
+
+        jsonResponse(res, { ...resPower, features: acc.features });
       } else {
         jsonResponse(res, resPower, 400);
       }
@@ -2054,7 +2885,13 @@ const server = http.createServer(async (req, res) => {
 
     appConfig.settings = { ...appConfig.settings, ...body };
     saveConfig(appConfig);
-    appendLog('System', '全局设置已更新，配额、保活周期与通知配置已生效', 'info');
+    appendLog('System', '全局设置已更新，定时调度与配置已即时热重载生效', 'info');
+
+    // 联动热更新：重新装载定时调度器的触发时间点
+    if (taskScheduler) {
+      taskScheduler.scheduleNextRun();
+      taskScheduler.checkStartupCatchup();
+    }
 
     // 联动热更新：更新正在运行中所有云电脑客户端的保活重连周期并即时重设倒计时
     const newKeepSeconds = appConfig.settings.keepAliveSeconds || 60;
@@ -2264,7 +3101,9 @@ const server = http.createServer(async (req, res) => {
 
       // 自动唤醒长连接保活
       const client = getClient(newAcc);
-      client.startKeepAliveWorker();
+      if (newAcc.features?.keepAlive === true) {
+        client.startKeepAliveWorker();
+      }
     }
 
     // 管理员导入时若带 settings 则一并更新

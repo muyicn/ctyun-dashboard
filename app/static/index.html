@@ -96,11 +96,17 @@
       <!-- 动态加载账号卡片 -->
     </div>
 
-    <!-- 实时控制台日志 (未登录时不渲染显示) -->
+    <!-- 实时控制台日志 (全双工智能防刷屏折叠与高质感终端视窗) -->
     <div class="log-panel hidden" id="main-log-panel">
       <div class="log-header">
-        <div style="font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 8px;">
-          <span>💻</span> 控制台实时日志 (<span id="log-status" style="color: #16a34a;">已连接</span>)
+        <div class="log-header-left">
+          <div class="mac-dots">
+            <div class="mac-dot mac-dot-red"></div>
+            <div class="mac-dot mac-dot-yellow"></div>
+            <div class="mac-dot mac-dot-green"></div>
+          </div>
+          <span style="font-weight: 600; font-size: 13px; margin-left: 6px;">实时控制台日志</span>
+          <span class="badge badge-online" id="log-status" style="margin-left: 4px;">已连接</span>
           <div style="display: flex; gap: 6px; margin-left: 12px;">
             <button class="btn btn-sm btn-primary" id="tab-tasks" onclick="switchLogFilter('tasks')">🎯 任务反馈</button>
             <button class="btn btn-sm" id="tab-heartbeat" onclick="switchLogFilter('heartbeat')">📡 心跳保活</button>
@@ -360,27 +366,34 @@
         <button class="modal-close" onclick="closeModal('settings-modal')">&times;</button>
       </div>
       <div class="modal-body">
-        <h4 style="font-size: 14px; margin-top: 4px; color: var(--accent);">⏰ 定时任务 Cron 表达式 (北京时间)</h4>
+        <h4 style="font-size: 14px; margin-top: 4px; color: var(--accent);">⏰ 精准时间点自动化调度 (北京时间，零空转超低功耗模式)</h4>
         <div class="form-group">
-          <label>每日签到打卡时间</label>
-          <input type="text" class="form-control" id="cron-sign" value="0 2 * * *">
-          <div class="form-text">默认每天凌晨 02:00 自动执行</div>
+          <label>每日任务准时触发时间点 (主调度中心)</label>
+          <input type="text" class="form-control" id="cron-task-time" value="08:00" placeholder="08:00">
+          <div class="form-text">【主触发规则】支持设定单个或多个时间点（如 <code>07:11</code> 或 <code>08:00, 12:00</code>）。到达设定时间准点全量触发所有账号任务，做完即标记今日完成，当天绝不再空转，并支持重启补跑兜底！</div>
         </div>
-        <div class="form-group">
-          <label>AI 智能对话积分时间</label>
-          <input type="text" class="form-control" id="cron-aichat" value="0 3,20 * * *">
-          <div class="form-text">默认每天 03:00 与 20:00 执行</div>
-        </div>
-        <div class="form-group">
-          <label>云电脑挂机 1 小时时间</label>
-          <input type="text" class="form-control" id="cron-hang" value="0 4,6 * * *">
-          <div class="form-text">默认每天 04:00 与 06:00 执行</div>
-        </div>
-        <div class="form-group">
-          <label>自动兑换与抽奖检查时间</label>
-          <input type="text" class="form-control" id="cron-redeem" value="0 7 * * *">
-          <div class="form-text">默认每天 07:00 执行兑换检查</div>
-        </div>
+        <details style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px; cursor: pointer;">
+          <summary style="font-weight: 500; color: var(--text);">高级：分项 Cron 表达式自定义 (辅助规则)</summary>
+          <div style="margin-top: 6px; padding: 10px; background: #f8fafc; border-radius: 6px; border: 1px solid var(--border);">
+            <div style="color: #475569; margin-bottom: 8px;">说明：上述【每日任务准时触发时间点】为主导机制。如需针对某单项单独在特定时间额外加跑，可在此设定 Cron 表达式：</div>
+            <div class="form-group">
+              <label>每日签到打卡 Cron</label>
+              <input type="text" class="form-control" id="cron-sign" value="0 2 * * *">
+            </div>
+            <div class="form-group">
+              <label>AI 智能对话积分 Cron</label>
+              <input type="text" class="form-control" id="cron-aichat" value="0 3,20 * * *">
+            </div>
+            <div class="form-group">
+              <label>云电脑挂机守护 Cron</label>
+              <input type="text" class="form-control" id="cron-hang" value="0 4,6 * * *">
+            </div>
+            <div class="form-group">
+              <label>自动兑换与抽奖检查 Cron</label>
+              <input type="text" class="form-control" id="cron-redeem" value="0 7 * * *">
+            </div>
+          </div>
+        </details>
 
         <h4 style="font-size: 14px; margin-top: 14px; color: var(--accent);">📡 保活与连接参数</h4>
         <div class="form-group">
@@ -548,53 +561,6 @@
       <div class="modal-footer">
         <button class="btn" onclick="closeModal('change-pwd-modal')">取消</button>
         <button class="btn btn-primary" onclick="submitChangePassword()">确认修改密码</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 云电脑分辨率与缩放比设置模态框 -->
-  <div class="modal-backdrop hidden" id="display-modal">
-    <div class="modal">
-      <div class="modal-header">
-        <h3>🖥️ 云电脑分辨率与缩放设置</h3>
-        <button class="modal-close" onclick="closeModal('display-modal')">&times;</button>
-      </div>
-      <div class="modal-body">
-        <input type="hidden" id="display-acc-id">
-        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 4px;">
-          设置后台挂机与任务登录时模拟的真实显示分辨率。系统将自动锁定此项参数，防止云电脑被意外降级到低分辨率。
-        </p>
-        <div class="form-group">
-          <label>快捷选择常用分辨率与缩放</label>
-          <select class="form-control" id="display-preset-select" onchange="onDisplayPresetChange()">
-            <option value="2560x1440@150">2560 × 1440 (2K高清) - 缩放 150% 【推荐】</option>
-            <option value="2560x1440@125">2560 × 1440 (2K高清) - 缩放 125%</option>
-            <option value="2560x1440@100">2560 × 1440 (2K高清) - 缩放 100%</option>
-            <option value="1920x1080@125">1920 × 1080 (1080P) - 缩放 125%</option>
-            <option value="1920x1080@100">1920 × 1080 (1080P) - 缩放 100%</option>
-            <option value="3840x2160@200">3840 × 2160 (4K超清) - 缩放 200%</option>
-            <option value="custom">自定义分辨率与缩放比</option>
-          </select>
-        </div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-          <div class="form-group">
-            <label>水平宽度 (Width, 像素)</label>
-            <input type="number" class="form-control" id="disp-width" value="2560" min="800" max="7680">
-          </div>
-          <div class="form-group">
-            <label>垂直高度 (Height, 像素)</label>
-            <input type="number" class="form-control" id="disp-height" value="1440" min="600" max="4320">
-          </div>
-        </div>
-        <div class="form-group">
-          <label>DPI 屏幕缩放比例 (Scale, %)</label>
-          <input type="number" class="form-control" id="disp-scale" value="150" min="100" max="300" step="25">
-          <div class="form-text">如 150 表示 150% 缩放 (对应 devicePixelRatio = 1.5)。</div>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn" onclick="closeModal('display-modal')">取消</button>
-        <button class="btn btn-primary" onclick="saveDisplayConfig()">保存分辨率设置</button>
       </div>
     </div>
   </div>

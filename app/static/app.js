@@ -26,6 +26,12 @@ document.addEventListener("DOMContentLoaded", () => {
     loadStatus();
   }, 5000);
 
+  // 窗口重获焦点时（例如关闭云电脑弹窗回到控制台主页），立即秒级同步最新开关与机器状态
+  window.addEventListener("focus", () => {
+    loadAccounts(true);
+    loadStatus();
+  });
+
   // 监听登录弹窗中的回车键，按回车直接提交登录！
   const authInputs = [document.getElementById("auth-username"), document.getElementById("auth-password")];
   authInputs.forEach(el => {
@@ -180,7 +186,7 @@ async function loadStatus() {
   }
 }
 
-// 打开每日已获得积分详细明细模态框
+// 打开每日已获得积分详细明细模态框 (展示各任务具体达成时间节点)
 function openPointsDetailModal() {
   const sumEl = document.getElementById("modal-points-sum");
   const listEl = document.getElementById("points-detail-list");
@@ -189,33 +195,42 @@ function openPointsDetailModal() {
   listEl.innerHTML = "";
 
   if (!cachedPointsDetails || cachedPointsDetails.length === 0) {
-    listEl.innerHTML = `<div style="text-align:center; padding:20px; color:var(--text-muted); font-size:13px;">暂无云电脑今日积分明细</div>`;
+    listEl.innerHTML = `<div style="text-align:center; padding:24px; color:var(--text-muted); font-size:13px;">暂无云电脑今日积分明细</div>`;
     openModal("points-detail-modal");
     return;
   }
 
   cachedPointsDetails.forEach(acc => {
     const item = document.createElement("div");
-    item.style.cssText = "background:#ffffff; border:1px solid var(--border); border-radius:8px; padding:14px; box-shadow:0 1px 3px rgba(0,0,0,0.02);";
+    item.style.cssText = "background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius); padding:16px; box-shadow:var(--shadow-sm);";
 
     let taskRows = (acc.tasks || []).map(t => {
-      const isDone = t.points > 0;
+      const isDone = t.completed || t.points > 0;
       return `
-        <div style="display:flex; justify-content:space-between; font-size:12.5px; padding:4px 0; border-bottom:1px dashed #f1f5f9;">
-          <span style="color:#334155;">${escapeHtml(t.name)}</span>
-          <span style="font-weight:700; color:${isDone ? '#16a34a' : '#d97706'};">
-            ${isDone ? `+${t.points} 积分 (已完成)` : `未完成 (${t.progress || '0/1'})`}
-          </span>
+        <div style="display:flex; justify-content:space-between; align-items:center; font-size:12.5px; padding:8px 0; border-bottom:1px dashed #e2e8f0;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:14px;">${isDone ? '✅' : '⏳'}</span>
+            <span style="font-weight:600; color:#0f172a;">${escapeHtml(t.name)}</span>
+            <span style="font-size:11px; font-weight:700; color:${isDone ? '#16a34a' : '#64748b'}; background:${isDone ? '#f0fdf4' : '#f1f5f9'}; padding:2px 8px; border-radius:9999px; border:1px solid ${isDone ? '#bbf7d0' : '#e2e8f0'};">
+              ${isDone ? `+${t.points} 积分` : `进行中 (${t.progress || '0/1'})`}
+            </span>
+          </div>
+          <div style="display:flex; align-items:center; gap:6px; font-size:12px;">
+            <span style="color:var(--text-muted);">达成时间节点:</span>
+            <span style="font-family:monospace; font-weight:600; color:${isDone ? '#2563eb' : '#94a3b8'}; background:${isDone ? '#eff6ff' : '#f8fafc'}; padding:2px 8px; border-radius:4px; border:1px solid ${isDone ? '#dbeafe' : '#f1f5f9'};">
+              ${isDone ? `🕒 ${escapeHtml(t.completedAt || '今日已达成')}` : '等待今日达成'}
+            </span>
+          </div>
         </div>
       `;
     }).join("");
 
     item.innerHTML = `
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; padding-bottom:8px; border-bottom:1px solid var(--border);">
         <span style="font-size:14px; font-weight:700; color:#0f172a;">🖥️ ${escapeHtml(acc.accountName)}</span>
         <span style="font-size:13px; color:#16a34a; font-weight:700;">今日获得: +${acc.todayPoints}分 (总积分: ${acc.totalPoints})</span>
       </div>
-      <div style="display:flex; flex-direction:column; gap:4px;">
+      <div style="display:flex; flex-direction:column; gap:2px;">
         ${taskRows}
       </div>
     `;
@@ -415,16 +430,18 @@ function renderAccounts() {
         </div>
       </div>
 
-      <!-- 快捷操作按钮 -->
+      <!-- 快捷操作按钮 (现代化零冗余规范) -->
       <div class="card-actions">
-        <button class="btn btn-sm btn-primary" onclick="launchWebDesktop('${acc.id}')" title="直接在弹窗浏览器中免密直达访问云电脑桌面 (自动适配设定的分辨率与缩放比)">🚀 访问云电脑</button>
-        <button class="btn btn-sm btn-success" onclick="triggerTask('${acc.id}', 'sign')">立即打卡</button>
-        <button class="btn btn-sm btn-primary" onclick="triggerTask('${acc.id}', 'aiChat')">立即AI对话</button>
-        <button class="btn btn-sm" onclick="triggerTask('${acc.id}', 'hang')">立即挂机同步</button>
-        <button class="btn btn-sm btn-warning" onclick="openManualRedeemModal('${acc.id}')" title="根据当前积分手动兑换商品或抽奖">🎁 手动兑换</button>
-        <button class="btn btn-sm" onclick="openPowerModal('${acc.id}')" title="云电脑电源管理 (开机/重启/关机)">⚡ 电源管理</button>
-        <button class="btn btn-sm" onclick="openDisplayModal('${acc.id}')" title="设置云电脑分辨率与缩放比">🖥️ 分辨率: ${acc.displayConfig?.width || 2560}*${acc.displayConfig?.height || 1440} (${acc.displayConfig?.scale || 150}%)</button>
-        ${!acc.bound ? `<button class="btn btn-sm btn-warning" onclick="openSmsModal('${acc.id}')">📲 短信绑定</button>` : ''}
+        <button class="btn btn-launch-full" onclick="launchWebDesktop('${acc.id}')" title="直接在独立弹窗中免密直通云电脑远程桌面">
+          <span>🚀 访问云电脑</span>
+          <span class="btn-subtext">免密直通桌面 ➔</span>
+        </button>
+        <div class="card-action-tools">
+          <button class="btn btn-tool" onclick="syncAccountTasks('${acc.id}')" title="一键极速执行今日全部任务 (打卡/AI对话/挂机)">🔄 一键同步任务</button>
+          <button class="btn btn-tool" onclick="openPowerModal('${acc.id}')" title="云电脑电源管理 (开机/重启/关机)">⚡ 电源管理</button>
+          <button class="btn btn-tool" onclick="openManualRedeemModal('${acc.id}')" title="根据当前积分手动兑换商品或抽奖">🎁 积分商城</button>
+        </div>
+        ${!acc.bound ? `<button class="btn btn-sm btn-warning" style="width:100%;margin-top:2px;" onclick="openSmsModal('${acc.id}')">📲 短信二次安全绑定</button>` : ''}
       </div>
     `;
 
@@ -955,7 +972,9 @@ async function executePowerAction(action) {
     if (res.ok && data.success) {
       showToast(data.message || `【${actionName}】指令下达成功！`, "success");
       closeModal("power-modal");
-      setTimeout(() => loadAccounts(true), 2000);
+      // 立即刷新前端账号开关状态并重载列表
+      await loadAccounts(true);
+      setTimeout(() => loadAccounts(true), 1500);
     } else {
       showToast(data.error || `操作失败: ${data.message || '网关拒绝'}`, "error");
     }
@@ -981,31 +1000,63 @@ async function launchWebDesktop(accId) {
       return;
     }
 
-    const d = data.displayConfig || { width: 2560, height: 1440, scale: 150 };
-    const winWidth = Math.min(window.screen.availWidth || 1920, parseInt(d.width) || 2560);
-    const winHeight = Math.min(window.screen.availHeight || 1080, parseInt(d.height) || 1440);
+    const winWidth = Math.min(window.screen.availWidth || 1920, 1920);
+    const winHeight = Math.min(window.screen.availHeight || 1080, 1080);
     const left = Math.max(0, Math.round((window.screen.availWidth - winWidth) / 2));
     const top = Math.max(0, Math.round((window.screen.availHeight - winHeight) / 2));
 
     const windowFeatures = `width=${winWidth},height=${winHeight},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes`;
     
-    // 打开独立弹窗窗口
-    const popup = window.open(data.targetUrl, `ctyun_desktop_${accId}`, windowFeatures);
+    // 构造直通操作界面 URL (自动免密注入与云电脑操作界面自适应)
+    const token = currentAuthToken || localStorage.getItem('ctyun_auth_token') || '';
+    const launchUrl = data.directViewUrl || `/desktop-view?accId=${accId}&token=${encodeURIComponent(token)}`;
+
+    // 打开免密直通独立操作窗口
+    const popup = window.open(launchUrl, `ctyun_desktop_${accId}`, windowFeatures);
 
     if (popup) {
       popup.focus();
-      showToast(`已为您弹出独立窗口访问【${data.desktopName}】 (分辨率: ${d.width}x${d.height} @ ${d.scale}%)`, "success");
+      showToast(`已为您直达打开【${data.desktopName}】云电脑操作界面！已自动完成免密鉴权。`, "success");
     } else {
       showToast("弹窗被浏览器拦截，请在地址栏右侧允许本站点弹出窗口！", "warning");
-      // 降级新标签页打开
-      window.open(data.targetUrl, '_blank');
+      window.open(launchUrl, '_blank');
     }
   } catch (e) {
     showToast("访问请求异常: " + e.message, "error");
   }
 }
 
-// 6. 手动触发真实任务
+// 6. 手动触发任务与一键全量任务同步
+async function syncAccountTasks(accId) {
+  const acc = accounts.find(a => a.id === accId);
+  if (!acc) return;
+
+  const f = acc.features || {};
+  showToast(`正在为【${acc.name || acc.user}】执行已开启项任务即时同步...`, "info");
+  
+  const tasksToRun = [];
+  if (f.autoSign !== false) tasksToRun.push({ type: 'sign', name: '登录打卡' });
+  if (f.aiChat !== false) tasksToRun.push({ type: 'aiChat', name: 'AI对话' });
+  if (f.cloudHang !== false) tasksToRun.push({ type: 'hang', name: '挂机守护' });
+  if (f.autoRedeem) tasksToRun.push({ type: 'redeem', name: '兑换检查' });
+
+  if (tasksToRun.length === 0) {
+    showToast(`【${acc.name || acc.user}】未开启任何自动化任务选项，无需同步。`, "warning");
+    return;
+  }
+
+  try {
+    for (const t of tasksToRun) {
+      await authFetch(`/api/accounts/${accId}/run/${t.type}`, { method: "POST" });
+    }
+
+    showToast(`🎉【${acc.name || acc.user}】已开启任务（${tasksToRun.map(t=>t.name).join('/')}）已即时完成同步！`, "success");
+    setTimeout(() => loadAccounts(true), 1200);
+  } catch (e) {
+    showToast("任务同步异常: " + e.message, "error");
+  }
+}
+
 async function triggerTask(accId, taskType) {
   const acc = accounts.find(a => a.id === accId);
   const taskNames = { sign: "签到打卡", aiChat: "AI智能对话", hang: "云电脑挂机", redeem: "自动兑换检查" };
@@ -1045,6 +1096,9 @@ async function openSettingsModal() {
     const settings = await res.json();
 
     const c = settings.cron || {};
+    if (document.getElementById("cron-task-time")) {
+      document.getElementById("cron-task-time").value = c.executeTime || "08:00";
+    }
     document.getElementById("cron-sign").value = c.signCron || "0 2 * * *";
     document.getElementById("cron-aichat").value = c.aiChatCron || "0 3,20 * * *";
     document.getElementById("cron-hang").value = c.cloudHangCron || "0 4,6 * * *";
@@ -1133,10 +1187,11 @@ async function saveSettings() {
     allowRegistration: document.getElementById("set-allow-reg") ? document.getElementById("set-allow-reg").checked : true,
     defaultQuota: document.getElementById("set-default-quota") ? parseInt(document.getElementById("set-default-quota").value) || 2 : 2,
     cron: {
-      signCron: document.getElementById("cron-sign").value.trim(),
-      aiChatCron: document.getElementById("cron-aichat").value.trim(),
-      cloudHangCron: document.getElementById("cron-hang").value.trim(),
-      redeemCron: document.getElementById("cron-redeem").value.trim()
+      executeTime: document.getElementById("cron-task-time") ? document.getElementById("cron-task-time").value.trim() : "08:00",
+      signCron: document.getElementById("cron-sign") ? document.getElementById("cron-sign").value.trim() : "0 2 * * *",
+      aiChatCron: document.getElementById("cron-aichat") ? document.getElementById("cron-aichat").value.trim() : "0 3,20 * * *",
+      cloudHangCron: document.getElementById("cron-hang") ? document.getElementById("cron-hang").value.trim() : "0 4,6 * * *",
+      redeemCron: document.getElementById("cron-redeem") ? document.getElementById("cron-redeem").value.trim() : "0 7 * * *"
     },
     notify: {
       enabled: document.getElementById("notify-enabled").checked,
@@ -1186,17 +1241,21 @@ function renderFilteredLogs() {
   });
 
   if (filtered.length === 0) {
-    logBox.innerHTML = `<div class="log-line" style="color: #64748b;">[暂无此类日志]</div>`;
+    logBox.innerHTML = `<div class="log-line" style="color: #64748b; padding: 12px 0; text-align: center;">[暂无此类日志]</div>`;
     return;
   }
 
   filtered.forEach(item => {
     const line = document.createElement("div");
     line.className = `log-line log-level-${item.level || 'info'}`;
+    if (item.id) line.dataset.logId = item.id;
+    const repeatBadge = (item.repeatCount && item.repeatCount > 1) 
+      ? `<span class="badge-repeat">x${item.repeatCount}</span>` 
+      : '';
     line.innerHTML = `
       <span class="log-time">[${item.timestamp}]</span>
       <span class="log-source">[${item.source}]</span>
-      <span>${escapeHtml(item.message)}</span>
+      <span class="log-text">${escapeHtml(item.message)}</span>${repeatBadge}
     `;
     logBox.appendChild(line);
   });
@@ -1210,7 +1269,7 @@ async function initLogStream() {
   // 未登录时直接不连接日志，保持静默
   if (!currentAuthToken) {
     statusSpan.innerText = "未登录";
-    statusSpan.style.color = "#64748b";
+    statusSpan.className = "badge badge-offline";
     return;
   }
 
@@ -1235,13 +1294,40 @@ async function initLogStream() {
   eventSource = new EventSource(sseUrl);
 
   eventSource.onopen = () => {
-    statusSpan.innerText = "实时连接中";
-    statusSpan.style.color = "#16a34a";
+    statusSpan.innerText = "已连接";
+    statusSpan.className = "badge badge-online";
   };
 
   eventSource.onmessage = (e) => {
     try {
       const item = JSON.parse(e.data);
+
+      if (item.isUpdate) {
+        // 全双工智能折叠：就地更新最后一行，刷新时间戳与徽标 x99
+        const idx = allReceivedLogs.findIndex(l => (l.id && l.id === item.id) || (l.source === item.source && l.accountName === item.accountName));
+        if (idx !== -1) {
+          allReceivedLogs[idx] = item;
+        } else {
+          allReceivedLogs.push(item);
+        }
+
+        const logBox = document.getElementById("log-content");
+        const existingLine = item.id ? logBox.querySelector(`[data-log-id="${item.id}"]`) : null;
+        if (existingLine) {
+          const repeatBadge = item.repeatCount > 1 ? `<span class="badge-repeat">x${item.repeatCount}</span>` : '';
+          existingLine.innerHTML = `
+            <span class="log-time">[${item.timestamp}]</span>
+            <span class="log-source">[${item.source}]</span>
+            <span class="log-text">${escapeHtml(item.message)}</span>${repeatBadge}
+          `;
+          existingLine.classList.remove('log-flash');
+          void existingLine.offsetWidth;
+          existingLine.classList.add('log-flash');
+          if (autoScroll) logBox.scrollTop = logBox.scrollHeight;
+          return;
+        }
+      }
+
       allReceivedLogs.push(item);
       if (allReceivedLogs.length > 3000) allReceivedLogs.shift();
 
@@ -1254,10 +1340,14 @@ async function initLogStream() {
         const logBox = document.getElementById("log-content");
         const line = document.createElement("div");
         line.className = `log-line log-level-${item.level || 'info'}`;
+        if (item.id) line.dataset.logId = item.id;
+        const repeatBadge = (item.repeatCount && item.repeatCount > 1) 
+          ? `<span class="badge-repeat">x${item.repeatCount}</span>` 
+          : '';
         line.innerHTML = `
           <span class="log-time">[${item.timestamp}]</span>
           <span class="log-source">[${item.source}]</span>
-          <span>${escapeHtml(item.message)}</span>
+          <span class="log-text">${escapeHtml(item.message)}</span>${repeatBadge}
         `;
         logBox.appendChild(line);
         if (autoScroll) logBox.scrollTop = logBox.scrollHeight;
@@ -1277,10 +1367,21 @@ async function initLogStream() {
   };
 }
 
-function clearLogs() {
+async function clearLogs() {
   allReceivedLogs = [];
-  document.getElementById("log-content").innerHTML = "";
-  showToast("日志已清屏", "info");
+  document.getElementById("log-content").innerHTML = `<div class="log-line" style="color: #64748b; padding: 12px 0; text-align: center;">[日志已彻底清空]</div>`;
+  
+  // 联动后端持久化清空
+  try {
+    const res = await authFetch('/api/logs/clear', { method: 'POST' });
+    if (res.ok) {
+      showToast("控制台与后台历史日志已全部一键清空", "success");
+    } else {
+      showToast("前端已清屏", "info");
+    }
+  } catch (e) {
+    showToast("前端已清屏", "info");
+  }
 }
 
 function toggleAutoScroll() {
@@ -1633,65 +1734,3 @@ async function submitAdminUserPassword() {
   }
 }
 
-// 分辨率与缩放设置
-function openDisplayModal(accId) {
-  const acc = accounts.find(a => a.id === accId);
-  if (!acc) return;
-  document.getElementById("display-acc-id").value = acc.id;
-
-  const d = acc.displayConfig || { width: 2560, height: 1440, scale: 150 };
-  document.getElementById("disp-width").value = d.width || 2560;
-  document.getElementById("disp-height").value = d.height || 1440;
-  document.getElementById("disp-scale").value = d.scale || 150;
-
-  // 匹配预设
-  const presetKey = `${d.width}x${d.height}@${d.scale}`;
-  const select = document.getElementById("display-preset-select");
-  let matched = false;
-  for (let i = 0; i < select.options.length; i++) {
-    if (select.options[i].value === presetKey) {
-      select.selectedIndex = i;
-      matched = true;
-      break;
-    }
-  }
-  if (!matched) select.value = "custom";
-
-  openModal("display-modal");
-}
-
-function onDisplayPresetChange() {
-  const val = document.getElementById("display-preset-select").value;
-  if (val === "custom") return;
-  const [res, scaleStr] = val.split("@");
-  const [w, h] = res.split("x");
-  document.getElementById("disp-width").value = parseInt(w);
-  document.getElementById("disp-height").value = parseInt(h);
-  document.getElementById("disp-scale").value = parseInt(scaleStr);
-}
-
-async function saveDisplayConfig() {
-  const accId = document.getElementById("display-acc-id").value;
-  const width = parseInt(document.getElementById("disp-width").value) || 2560;
-  const height = parseInt(document.getElementById("disp-height").value) || 1440;
-  const scale = parseInt(document.getElementById("disp-scale").value) || 150;
-
-  try {
-    const res = await authFetch(`/api/accounts/${accId}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        displayConfig: { width, height, scale }
-      })
-    });
-    if (res.ok) {
-      showToast(`云电脑已锁定为 ${width}×${height} 缩放 ${scale}%！`, "success");
-      closeModal("display-modal");
-      loadAccounts();
-    } else {
-      showToast("保存分辨率设置失败", "error");
-    }
-  } catch (e) {
-    showToast("请求异常: " + e.message, "error");
-  }
-}
