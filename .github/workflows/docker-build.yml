@@ -25,7 +25,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 1. 登录 GitHub Packages (GHCR)
+      # 1. 登录 GitHub Packages (GHCR，自带永久可用权限)
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -33,8 +33,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2. 登录 Docker Hub (使用标准 env 映射 secrets，符合 GitHub Actions 语法规范)
+      # 2. 登录 Docker Hub (若配置了凭据则尝试登录)
       - name: Log in to Docker Hub
+        id: dockerhub-login
+        continue-on-error: true
         env:
           DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKER_USERNAME }}
           DOCKER_PASS: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKER_PASSWORD }}
@@ -44,22 +46,35 @@ jobs:
           username: ${{ env.DOCKER_USER }}
           password: ${{ env.DOCKER_PASS }}
 
-      # 3. 提取双源标签 (同时推送到 GHCR 和 Docker Hub)
+      # 3. 动态配置镜像目标列表 (若 Docker Hub 登录成功则推送到双源，否则推送到 GHCR，确保绝不构建中断)
+      - name: Determine Docker images
+        id: image-targets
+        env:
+          DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKER_USERNAME }}
+        run: |
+          IMAGES="ghcr.io/${{ github.repository }}"
+          if [ "${{ steps.dockerhub-login.outcome }}" = "success" ]; then
+            IMAGES="${IMAGES}
+          muyicn/ctyun-dashboard"
+          fi
+          echo "images<<EOF" >> $GITHUB_OUTPUT
+          echo "$IMAGES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # 4. 提取镜像元数据与多架构标签
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            ghcr.io/${{ github.repository }}
-            muyicn/ctyun-dashboard
+          images: ${{ steps.image-targets.outputs.images }}
           tags: |
             type=raw,value=latest
             type=ref,event=branch
             type=semver,pattern={{version}}
 
-      # 4. 构建多架构镜像并同时推送到镜像源
+      # 5. 构建多架构镜像 (linux/amd64, linux/arm64) 并推送
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
