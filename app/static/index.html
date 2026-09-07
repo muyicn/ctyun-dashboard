@@ -146,6 +146,19 @@
           <input type="password" class="form-control" id="acc-password" placeholder="请输入登录密码">
         </div>
         <div class="form-group">
+          <label>图形验证码 <span style="color:red">*</span></label>
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <input type="text" class="form-control" id="acc-captcha-code" placeholder="输入4位验证码" maxlength="6" style="flex: 1; text-transform: uppercase;">
+            <div style="cursor: pointer; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; height: 38px; display: flex; align-items: center; background: #f8fafc;" onclick="refreshModalCaptcha()" title="点击换一张验证码">
+              <img id="acc-captcha-img" src="" alt="点击刷新" style="height: 38px; min-width: 85px; display: none;">
+              <span id="acc-captcha-loading" style="font-size: 12px; color: var(--text-muted); padding: 0 10px;">点击获取验证码</span>
+            </div>
+          </div>
+          <input type="hidden" id="acc-challenge-id">
+          <input type="hidden" id="acc-challenge-code">
+          <div class="form-text">输入手机号后点击图片即可获取天翼云官方验证码（如看不清可直接点击图片换一张）。</div>
+        </div>
+        <div class="form-group">
           <div style="display: flex; justify-content: space-between; align-items: center;">
             <label>设备码 (DeviceCode)</label>
             <a href="javascript:void(0)" onclick="generateNewDeviceCode()" style="font-size: 12px; color: var(--accent);">重新随机生成</a>
@@ -369,28 +382,39 @@
         <h4 style="font-size: 14px; margin-top: 4px; color: var(--accent);">⏰ 精准时间点自动化调度 (北京时间，零空转超低功耗模式)</h4>
         <div class="form-group">
           <label>每日任务准时触发时间点 (主调度中心)</label>
-          <input type="text" class="form-control" id="cron-task-time" value="08:00" placeholder="08:00">
-          <div class="form-text">【主触发规则】支持设定单个或多个时间点（如 <code>07:11</code> 或 <code>08:00, 12:00</code>）。到达设定时间准点全量触发所有账号任务，做完即标记今日完成，当天绝不再空转，并支持重启补跑兜底！</div>
+          <input type="text" class="form-control" id="cron-task-time" value="01:20" placeholder="01:20">
+          <div class="form-text">【主触发规则】支持设定单个或多个时间点（如 <code>01:20</code> 或 <code>01:20, 12:00</code>）。到达设定时间准点全量触发所有账号任务，做完即标记今日完成，当天绝不再空转，并支持重启补跑兜底！</div>
         </div>
-        <details style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px; cursor: pointer;">
+        <details style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px; cursor: pointer;" id="details-sub-cron">
           <summary style="font-weight: 500; color: var(--text);">高级：分项 Cron 表达式自定义 (辅助规则)</summary>
-          <div style="margin-top: 6px; padding: 10px; background: #f8fafc; border-radius: 6px; border: 1px solid var(--border);">
-            <div style="color: #475569; margin-bottom: 8px;">说明：上述【每日任务准时触发时间点】为主导机制。如需针对某单项单独在特定时间额外加跑，可在此设定 Cron 表达式：</div>
-            <div class="form-group">
-              <label>每日签到打卡 Cron</label>
-              <input type="text" class="form-control" id="cron-sign" value="0 2 * * *">
+          <div style="margin-top: 6px; padding: 12px; background: #f8fafc; border-radius: 6px; border: 1px solid var(--border);">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px dashed var(--border);">
+              <span style="font-size: 13px; font-weight: 600; color: #0f172a;">启用分项 Cron 独立辅助规则</span>
+              <label class="switch">
+                <input type="checkbox" id="cron-enable-sub" onchange="toggleSubCronInputs(this.checked)">
+                <span class="slider"></span>
+              </label>
             </div>
-            <div class="form-group">
-              <label>AI 智能对话积分 Cron</label>
-              <input type="text" class="form-control" id="cron-aichat" value="0 3,20 * * *">
+            <div style="color: #475569; margin-bottom: 8px; line-height: 1.5;">
+              优先级说明：未启动本开关，或启动但未填写任何具体规则时，<b>一律以上方主调度中心的时间节点为准</b>；若开启且填写了分项规则，则<b>以填写的分项规则为准独立执行</b>。
             </div>
-            <div class="form-group">
-              <label>云电脑挂机守护 Cron</label>
-              <input type="text" class="form-control" id="cron-hang" value="0 4,6 * * *">
-            </div>
-            <div class="form-group">
-              <label>自动兑换与抽奖检查 Cron</label>
-              <input type="text" class="form-control" id="cron-redeem" value="0 7 * * *">
+            <div id="sub-cron-inputs-container">
+              <div class="form-group">
+                <label>每日签到打卡 Cron</label>
+                <input type="text" class="form-control" id="cron-sign" placeholder="0 2 * * *">
+              </div>
+              <div class="form-group">
+                <label>AI 智能对话积分 Cron</label>
+                <input type="text" class="form-control" id="cron-aichat" placeholder="0 3,20 * * *">
+              </div>
+              <div class="form-group">
+                <label>云电脑挂机守护 Cron</label>
+                <input type="text" class="form-control" id="cron-hang" placeholder="0 4,6 * * *">
+              </div>
+              <div class="form-group">
+                <label>自动兑换与抽奖检查 Cron</label>
+                <input type="text" class="form-control" id="cron-redeem" placeholder="0 7 * * *">
+              </div>
             </div>
           </div>
         </details>
@@ -399,7 +423,12 @@
         <div class="form-group">
           <label>保活强制重连周期 (秒)</label>
           <input type="number" class="form-control" id="set-keepalive-sec" value="60" min="10">
-          <div class="form-text">建议保持默认 60 秒，周期性主动维持天翼长连接</div>
+          <div class="form-text">【挂机模式生效】每日 1 小时任务未达标时，长连接保持该时长后强制重连刷新会话 (建议默认 60 秒)。</div>
+        </div>
+        <div class="form-group">
+          <label>脉冲保活间隔 (分钟)</label>
+          <input type="number" class="form-control" id="set-pulse-min" value="45" min="5" max="55">
+          <div class="form-text">【脉冲模式生效】每日任务达标后，每隔该时长进行一次短暂真实连接 (约 60 秒) 防止云电脑休眠。因天翼云断开 1 小时自动休眠，此值必须小于 60 分钟 (建议默认 45 分钟)；期间检测到浏览器/官方客户端占用时自动暂停，从其释放断开后重新计算。</div>
         </div>
 
         <h4 style="font-size: 14px; margin-top: 14px; color: var(--accent);">👥 多用户开放注册与默认配额</h4>

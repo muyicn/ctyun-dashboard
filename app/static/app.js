@@ -294,6 +294,11 @@ function renderAccounts() {
       ? `<span class="badge badge-online">🟢 保活长连接在线</span>`
       : `<span class="badge badge-offline">⚪ 未连接</span>`;
 
+    let sessionBadge = '';
+    if (acc.sessionExpired) {
+      sessionBadge = `<span class="badge badge-danger" style="cursor:pointer;" onclick="editAccount('${acc.id}')">⚠️ 会话已失效，点击重新验证</span>`;
+    }
+
     const boundBadge = acc.bound
       ? `<span class="badge" style="background: rgba(22,163,74,0.12); color: #16a34a; border: 1px solid rgba(22,163,74,0.25);">已绑设备</span>`
       : `<span class="badge badge-warning" style="cursor: pointer;" onclick="openSmsModal('${acc.id}')">⚠️ 待短信绑定</span>`;
@@ -353,7 +358,7 @@ function renderAccounts() {
               ${statusBadge}
             </h3>
             <div class="account-phone">
-              📱 ${maskPhone} &nbsp; ${boundBadge}
+              📱 ${maskPhone} &nbsp; ${sessionBadge || boundBadge}
             </div>
           </div>
         </div>
@@ -432,6 +437,12 @@ function renderAccounts() {
 
       <!-- 快捷操作按钮 (现代化零冗余规范) -->
       <div class="card-actions">
+        ${acc.sessionExpired ? `
+          <button class="btn btn-danger btn-launch-full" onclick="editAccount('${acc.id}')" style="margin-bottom:6px;">
+            <span>🔑 重新验证登录</span>
+            <span class="btn-subtext">输验证码恢复 ➔</span>
+          </button>
+        ` : ''}
         <button class="btn btn-launch-full" onclick="launchWebDesktop('${acc.id}')" title="直接在独立弹窗中免密直通云电脑远程桌面">
           <span>🚀 访问云电脑</span>
           <span class="btn-subtext">免密直通桌面 ➔</span>
@@ -478,36 +489,86 @@ async function toggleFeature(accId, featureKey, checked) {
 }
 
 // 3. 添加/编辑账号
+let currentCaptchaChallenge = null;
+
+async function refreshModalCaptcha() {
+  const user = document.getElementById("acc-user").value.trim() || '13800000000';
+  const devCode = document.getElementById("acc-device-code").value.trim() || '';
+  const imgEl = document.getElementById("acc-captcha-img");
+  const loadingEl = document.getElementById("acc-captcha-loading");
+
+  loadingEl.style.display = "inline";
+  loadingEl.innerText = "获取中...";
+  imgEl.style.display = "none";
+
+  try {
+    const res = await authFetch(`/api/captcha/${encodeURIComponent(user)}?deviceCode=${encodeURIComponent(devCode)}`);
+    const data = await res.json();
+    if (res.ok && data.success) {
+      currentCaptchaChallenge = data;
+      document.getElementById("acc-challenge-id").value = data.challengeId;
+      document.getElementById("acc-challenge-code").value = data.challengeCode;
+      imgEl.src = data.captchaImage;
+      imgEl.style.display = "block";
+      loadingEl.style.display = "none";
+    } else {
+      loadingEl.innerText = "获取失败，点击重试";
+    }
+  } catch (e) {
+    loadingEl.innerText = "网络异常，点击重试";
+  }
+}
+
 function openAddAccountModal() {
   document.getElementById("modal-account-title").innerText = "添加天翼云账号";
   document.getElementById("acc-id").value = "";
   document.getElementById("acc-name").value = "";
   document.getElementById("acc-user").value = "";
   document.getElementById("acc-password").value = "";
+  document.getElementById("acc-captcha-code").value = "";
   document.getElementById("acc-device-code").value = "";
   openModal("account-modal");
+  setTimeout(refreshModalCaptcha, 300);
 }
 
 function editAccount(accId) {
   const acc = accounts.find(a => a.id === accId);
   if (!acc) return;
-  document.getElementById("modal-account-title").innerText = "编辑天翼云账号";
+  document.getElementById("modal-account-title").innerText = acc.sessionExpired ? "⚠️ 重新验证天翼云账号" : "编辑天翼云账号";
   document.getElementById("acc-id").value = acc.id;
   document.getElementById("acc-name").value = acc.name || "";
   document.getElementById("acc-user").value = acc.user || "";
   document.getElementById("acc-password").value = acc.password || "";
+  document.getElementById("acc-captcha-code").value = "";
   document.getElementById("acc-device-code").value = acc.deviceCode || "";
   openModal("account-modal");
+  setTimeout(refreshModalCaptcha, 300);
 }
 
 async function generateNewDeviceCode() {
   try {
-    const res = await fetch("/api/device/generate", { method: "POST" });
+    const res = await authFetch("/api/device/generate", { method: "POST" });
     const data = await res.json();
-    document.getElementById("acc-device-code").value = data.deviceCode;
-    showToast("已重新生成设备码", "info");
+    if (data && data.deviceCode) {
+      document.getElementById("acc-device-code").value = data.deviceCode;
+      showToast("已重新生成设备码", "info");
+      refreshModalCaptcha();
+    } else {
+      // 前端本地生成 32 位标准 web_ 设备码作为即时兜底
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+      let code = 'web_';
+      for (let i = 0; i < 32; i++) code += chars.charAt(Math.floor(Math.random() * chars.length));
+      document.getElementById("acc-device-code").value = code;
+      showToast("已重新生成设备码", "info");
+      refreshModalCaptcha();
+    }
   } catch (e) {
-    showToast("生成失败", "error");
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let code = 'web_';
+    for (let i = 0; i < 32; i++) code += chars.charAt(Math.floor(Math.random() * chars.length));
+    document.getElementById("acc-device-code").value = code;
+    showToast("已重新生成设备码", "info");
+    refreshModalCaptcha();
   }
 }
 
@@ -517,15 +578,35 @@ async function saveAccount() {
   const user = document.getElementById("acc-user").value.trim();
   const password = document.getElementById("acc-password").value.trim();
   const deviceCode = document.getElementById("acc-device-code").value.trim();
+  const captchaCode = document.getElementById("acc-captcha-code").value.trim();
+  const challengeId = document.getElementById("acc-challenge-id").value.trim();
+  const challengeCode = document.getElementById("acc-challenge-code").value.trim();
 
   if (!user || !password) {
     showToast("手机号/账号与密码不能为空", "error");
     return;
   }
 
+  // 新增账号或重登验证时，强制要求输入验证码
+  if (!accId || (accId && captchaCode)) {
+    if (!captchaCode) {
+      showToast("请输入图形验证码", "error");
+      document.getElementById("acc-captcha-code").focus();
+      return;
+    }
+  }
+
   showToast("正在向天翼云发起真实登录验证，请稍候...", "info");
 
-  const payload = { name: name || user, user, password, deviceCode };
+  const payload = {
+    name: name || user,
+    user,
+    password,
+    deviceCode,
+    captchaCode,
+    challengeId,
+    challengeCode
+  };
 
   try {
     let res;
@@ -550,7 +631,8 @@ async function saveAccount() {
       checkCurrentUser();
       loadAccounts();
     } else {
-      showToast("❌ 操作未通过: " + (data.error || "用户名或密码错误"), "error");
+      showToast("❌ 操作未通过: " + (data.error || "验证码或密码错误"), "error");
+      refreshModalCaptcha();
     }
   } catch (e) {
     showToast("请求异常: " + e.message, "error");
@@ -853,6 +935,12 @@ function onManualProductChange() {
   const selectedOpt = select.options[select.selectedIndex];
   if (selectedOpt) {
     document.getElementById("manual-prod-desc").innerText = selectedOpt.dataset.desc || "";
+    // 如果是升配包（pointstplupgrade），需要选择云电脑；数据盘、智库等直发型商品无需强制选择设备
+    const prodType = selectedOpt.dataset.type;
+    const desktopGroup = document.getElementById("group-manual-desktop");
+    if (desktopGroup) {
+      desktopGroup.style.display = (prodType === 'pointstplupgrade') ? 'block' : 'none';
+    }
   }
   updateManualTotalCost();
 }
@@ -870,6 +958,7 @@ async function loadManualDesktops(accId) {
         list.forEach(d => {
           const opt = document.createElement("option");
           opt.value = d.desktopId;
+          opt.dataset.prodInstId = d.prodInstId || "";
           opt.innerText = `${d.desktopName || d.desktopCode} (${d.useStatusText || '运行中'})`;
           select.appendChild(opt);
         });
@@ -903,7 +992,9 @@ async function submitManualRedeemOrder() {
   const prodName = selectedOpt.dataset.name;
   const prodType = selectedOpt.dataset.type;
   const costPoints = parseInt(selectedOpt.dataset.points) || 0;
-  const desktopId = parseInt(document.getElementById("manual-desktop-select").value) || 0;
+  const desktopSelect = document.getElementById("manual-desktop-select");
+  const desktopId = parseInt(desktopSelect.value) || 0;
+  const prodInstId = desktopSelect.options[desktopSelect.selectedIndex]?.dataset.prodInstId || "";
   const times = Math.max(1, parseInt(document.getElementById("manual-order-times").value) || 1);
   const totalCost = costPoints * times;
 
@@ -925,7 +1016,7 @@ async function submitManualRedeemOrder() {
     const res = await authFetch(`/api/accounts/${accId}/order`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prodId, prodName, prodType, costPoints, desktopId, times })
+      body: JSON.stringify({ prodId, prodName, prodType, costPoints, desktopId, prodInstId, times })
     });
     const data = await res.json();
     if (res.ok && data.success) {
@@ -933,7 +1024,9 @@ async function submitManualRedeemOrder() {
       closeModal("manual-redeem-modal");
       await loadAccounts();
     } else {
+      const errDetail = data.reason ? `${data.error}\n\n🔍 原因分析: ${data.reason}` : (data.error || "兑换下单失败");
       showToast(data.error || "兑换下单失败", "error");
+      alert(errDetail);
     }
   } catch (e) {
     showToast("请求异常: " + e.message, "error");
@@ -1097,14 +1190,22 @@ async function openSettingsModal() {
 
     const c = settings.cron || {};
     if (document.getElementById("cron-task-time")) {
-      document.getElementById("cron-task-time").value = c.executeTime || "08:00";
+      document.getElementById("cron-task-time").value = c.executeTime || "01:20";
     }
-    document.getElementById("cron-sign").value = c.signCron || "0 2 * * *";
-    document.getElementById("cron-aichat").value = c.aiChatCron || "0 3,20 * * *";
-    document.getElementById("cron-hang").value = c.cloudHangCron || "0 4,6 * * *";
-    document.getElementById("cron-redeem").value = c.redeemCron || "0 7 * * *";
+    const enableSub = c.enableSubCron === true;
+    if (document.getElementById("cron-enable-sub")) {
+      document.getElementById("cron-enable-sub").checked = enableSub;
+    }
+    document.getElementById("cron-sign").value = c.signCron || "";
+    document.getElementById("cron-aichat").value = c.aiChatCron || "";
+    document.getElementById("cron-hang").value = c.cloudHangCron || "";
+    document.getElementById("cron-redeem").value = c.redeemCron || "";
+    toggleSubCronInputs(enableSub);
 
     document.getElementById("set-keepalive-sec").value = settings.keepAliveSeconds || 60;
+    if (document.getElementById("set-pulse-min")) {
+      document.getElementById("set-pulse-min").value = settings.pulseIntervalMinutes || 45;
+    }
     if (document.getElementById("set-allow-reg")) {
       document.getElementById("set-allow-reg").checked = settings.allowRegistration === true;
     }
@@ -1155,6 +1256,17 @@ async function testNotification() {
   }
 }
 
+function toggleSubCronInputs(enabled) {
+  const container = document.getElementById("sub-cron-inputs-container");
+  if (!container) return;
+  const inputs = container.querySelectorAll("input");
+  inputs.forEach(input => {
+    input.disabled = !enabled;
+    input.style.opacity = enabled ? "1" : "0.55";
+    input.style.background = enabled ? "#ffffff" : "#f1f5f9";
+  });
+}
+
 function onNotifyChannelChange() {
   const channel = document.getElementById("notify-channel").value;
   const label = document.getElementById("notify-token-label");
@@ -1184,14 +1296,16 @@ function onNotifyChannelChange() {
 async function saveSettings() {
   const payload = {
     keepAliveSeconds: parseInt(document.getElementById("set-keepalive-sec").value) || 60,
+    pulseIntervalMinutes: Math.min(55, Math.max(5, parseInt(document.getElementById("set-pulse-min") ? document.getElementById("set-pulse-min").value : 45) || 45)),
     allowRegistration: document.getElementById("set-allow-reg") ? document.getElementById("set-allow-reg").checked : true,
     defaultQuota: document.getElementById("set-default-quota") ? parseInt(document.getElementById("set-default-quota").value) || 2 : 2,
     cron: {
       executeTime: document.getElementById("cron-task-time") ? document.getElementById("cron-task-time").value.trim() : "08:00",
-      signCron: document.getElementById("cron-sign") ? document.getElementById("cron-sign").value.trim() : "0 2 * * *",
-      aiChatCron: document.getElementById("cron-aichat") ? document.getElementById("cron-aichat").value.trim() : "0 3,20 * * *",
-      cloudHangCron: document.getElementById("cron-hang") ? document.getElementById("cron-hang").value.trim() : "0 4,6 * * *",
-      redeemCron: document.getElementById("cron-redeem") ? document.getElementById("cron-redeem").value.trim() : "0 7 * * *"
+      enableSubCron: document.getElementById("cron-enable-sub") ? document.getElementById("cron-enable-sub").checked : false,
+      signCron: document.getElementById("cron-sign") ? document.getElementById("cron-sign").value.trim() : "",
+      aiChatCron: document.getElementById("cron-aichat") ? document.getElementById("cron-aichat").value.trim() : "",
+      cloudHangCron: document.getElementById("cron-hang") ? document.getElementById("cron-hang").value.trim() : "",
+      redeemCron: document.getElementById("cron-redeem") ? document.getElementById("cron-redeem").value.trim() : ""
     },
     notify: {
       enabled: document.getElementById("notify-enabled").checked,

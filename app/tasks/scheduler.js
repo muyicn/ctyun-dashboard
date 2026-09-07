@@ -57,11 +57,10 @@ function shouldRunCron(cronExpr, date = new Date()) {
 }
 
 class TaskScheduler {
-  constructor({ getAccounts, getSettings, getClient, ocrEngine, appendLog, sendNotification, saveConfig }) {
+  constructor({ getAccounts, getSettings, getClient, appendLog, sendNotification, saveConfig }) {
     this.getAccounts = getAccounts;
     this.getSettings = getSettings;
     this.getClient = getClient;
-    this.ocrEngine = ocrEngine;
     this.appendLog = appendLog;
     this.sendNotification = sendNotification;
     this.saveConfig = saveConfig;
@@ -96,9 +95,9 @@ class TaskScheduler {
   getTargetTimes() {
     const settings = this.getSettings() || {};
     const cron = settings.cron || {};
-    const rawTimes = cron.executeTime || cron.taskTime || '08:00';
+    const rawTimes = cron.executeTime || cron.taskTime || '01:20';
     const list = rawTimes.split(/[,，\s]+/).map(t => t.trim()).filter(Boolean);
-    return list.length > 0 ? list : ['08:00'];
+    return list.length > 0 ? list : ['01:20'];
   }
 
   /**
@@ -207,6 +206,16 @@ class TaskScheduler {
   }
 
   /**
+   * 判断辅助规则是否启用且包含有效规则
+   */
+  hasActiveSubCronRules() {
+    const settings = this.getSettings() || {};
+    const cron = settings.cron || {};
+    if (!cron.enableSubCron) return false;
+    return !!(cron.signCron?.trim() || cron.aiChatCron?.trim() || cron.cloudHangCron?.trim() || cron.redeemCron?.trim());
+  }
+
+  /**
    * 30 秒巡检看门狗：负责准点分钟匹配、高级 Cron 触发以及热更新重调度
    */
   async heartbeatTick() {
@@ -218,24 +227,43 @@ class TaskScheduler {
     const targetTimes = this.getTargetTimes();
     const todayStr = getBeijingDateStr();
 
-    // 1. 如果当前分钟刚好等于预设的时间点之一，且今日尚未执行
-    if (targetTimes.includes(currentHm)) {
-      this.lastTriggerMinute = currentMinKey;
-      if (this.lastCompletedDate !== todayStr) {
-        this.appendLog('Scheduler', `⏰ 到达每日任务准时触发时间点 [${currentHm}]，正在启动今日自动化流程...`, 'info');
-        await this.runAllAccounts('scheduled_point');
-        this.scheduleNextRun();
-        return;
-      }
-    }
-
-    // 2. 高级模式：分项 Cron 检查 (若用户配置了独立分项，按需单项触发)
     const settings = this.getSettings() || {};
     const cron = settings.cron || {};
+    const subCronActive = this.hasActiveSubCronRules();
+
+    // 1. 如果未启用辅助规则，或者虽然启用了辅助规则但没有填写任何具体规则：
+    // 则以【每日任务准时触发时间点 (主调度中心)】为主触发机制
+    if (!subCronActive) {
+      if (targetTimes.includes(currentHm)) {
+        this.lastTriggerMinute = currentMinKey;
+        if (this.lastCompletedDate !== todayStr) {
+          this.appendLog('Scheduler', `⏰ 到达主调度中心每日任务准时触发时间点 [${currentHm}]，正在启动全自动流程...`, 'info');
+          await this.runAllAccounts('scheduled_point');
+          this.scheduleNextRun();
+          return;
+        }
+      }
+      return;
+    }
+
+    // 2. 如果启用了辅助规则且填写了具体 Cron 表达式：
+    // 则严格以用户填写的各项辅助规则为准独立执行，未填写的分项则兜底遵循主调度中心时间
     const accounts = (this.getAccounts() || []).filter(a => a.enabled);
 
-    if (cron.signCron && shouldRunCron(cron.signCron, bj)) {
-      this.lastTriggerMinute = currentMinKey;
+    // 2.1 每日签到打卡分项规则
+    if (cron.signCron?.trim()) {
+      if (shouldRunCron(cron.signCron.trim(), bj)) {
+        this.lastTriggerMinute = currentMinKey;
+        this.appendLog('Scheduler', `⏰ 触发分项辅助规则 [签到打卡] (Cron: ${cron.signCron})...`, 'info');
+        for (const acc of accounts) {
+          if (acc.features?.autoSign !== false) {
+            const client = this.getClient(acc);
+            executeNativeSign(client, acc, (src, msg, lvl) => this.appendLog(src, `[${acc.name}] ${msg}`, lvl)).catch(() => {});
+          }
+        }
+      }
+    } else if (targetTimes.includes(currentHm) && this.lastCompletedDate !== todayStr) {
+      // 辅助规则未配置该项，按主时间点兜底
       for (const acc of accounts) {
         if (acc.features?.autoSign !== false) {
           const client = this.getClient(acc);
@@ -244,12 +272,52 @@ class TaskScheduler {
       }
     }
 
-    if (cron.aiChatCron && shouldRunCron(cron.aiChatCron, bj)) {
-      this.lastTriggerMinute = currentMinKey;
+    // 2.2 AI 智能对话分项规则
+    if (cron.aiChatCron?.trim()) {
+      if (shouldRunCron(cron.aiChatCron.trim(), bj)) {
+        this.lastTriggerMinute = currentMinKey;
+        this.appendLog('Scheduler', `⏰ 触发分项辅助规则 [AI 对话] (Cron: ${cron.aiChatCron})...`, 'info');
+        for (const acc of accounts) {
+          if (acc.features?.aiChat !== false) {
+            const client = this.getClient(acc);
+            executeNativeAiChat(client, acc, (src, msg, lvl) => this.appendLog(src, `[${acc.name}] ${msg}`, lvl)).catch(() => {});
+          }
+        }
+      }
+    } else if (targetTimes.includes(currentHm) && this.lastCompletedDate !== todayStr) {
+      // 辅助规则未配置该项，按主时间点兜底
       for (const acc of accounts) {
         if (acc.features?.aiChat !== false) {
           const client = this.getClient(acc);
           executeNativeAiChat(client, acc, (src, msg, lvl) => this.appendLog(src, `[${acc.name}] ${msg}`, lvl)).catch(() => {});
+        }
+      }
+    }
+
+    // 2.3 云电脑挂机守护分项规则
+    if (cron.cloudHangCron?.trim()) {
+      if (shouldRunCron(cron.cloudHangCron.trim(), bj)) {
+        this.lastTriggerMinute = currentMinKey;
+        this.appendLog('Scheduler', `⏰ 触发分项辅助规则 [云电脑挂机] (Cron: ${cron.cloudHangCron})...`, 'info');
+        for (const acc of accounts) {
+          if (acc.features?.cloudHang !== false) {
+            const client = this.getClient(acc);
+            executeNativeHang(client, acc, (src, msg, lvl) => this.appendLog(src, `[${acc.name}] ${msg}`, lvl)).catch(() => {});
+          }
+        }
+      }
+    }
+
+    // 2.4 自动兑换与抽奖分项规则
+    if (cron.redeemCron?.trim()) {
+      if (shouldRunCron(cron.redeemCron.trim(), bj)) {
+        this.lastTriggerMinute = currentMinKey;
+        this.appendLog('Scheduler', `⏰ 触发分项辅助规则 [自动兑换/抽奖] (Cron: ${cron.redeemCron})...`, 'info');
+        for (const acc of accounts) {
+          if (acc.features?.autoRedeem) {
+            const client = this.getClient(acc);
+            client.getRewards().catch(() => {});
+          }
         }
       }
     }
@@ -280,8 +348,8 @@ class TaskScheduler {
       }
 
       try {
-        // 1. 底层 WSS 长连接保活守护 (避免被踢)
-        if (!client.wsAlive && acc.features?.cloudHang !== false) {
+        // 1. 底层 WSS 长连接保活守护 (避免被踢) —— 仅在保活开关开启时拉起，尊重用户主动关机保护
+        if (!client.wsAlive && acc.features?.cloudHang !== false && acc.features?.keepAlive !== false) {
           client.startKeepAliveWorker();
         }
 

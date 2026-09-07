@@ -5,7 +5,6 @@ const path = require('path');
 const crypto = require('crypto');
 const net = require('net');
 const WebSocket = require('ws');
-const LightweightOcr = require('./app/lightweight_ocr');
 const CtYunEncryption = require('./app/ctyun_encryption');
 const { executeNativeAiChat, executeNativeSign, executeNativeHang } = require('./app/tasks/native_tasks');
 const { AuthManager } = require('./app/auth_manager');
@@ -29,13 +28,7 @@ const DEVICES_DIR = path.join(DATA_DIR, 'devices');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(DEVICES_DIR)) fs.mkdirSync(DEVICES_DIR, { recursive: true });
 
-let ocrEngine = null;
-try {
-  ocrEngine = new LightweightOcr();
-  console.log('[*] 极速轻量化原生 ONNX 识别引擎初始化成功 (已彻底剔除 TensorFlow 与 WebAssembly)');
-} catch (e) {
-  console.error('[!] 轻量 OCR 初始化异常:', e);
-}
+console.log('[*] 纯原生超轻量内核已启动 (纯 HTTP/WebSocket 协议直连，纯净无负担)');
 
 const logs = [];
 const sseClients = new Set();
@@ -167,6 +160,18 @@ function canUserSeeLog(session, logEntry) {
 function md5(str) {
   return crypto.createHash('md5').update(str).digest('hex').toLowerCase();
 }
+
+// 带超时保护的网络请求 (防止天翼云网关偶发挂起导致保活循环永久阻塞)
+async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function sha256(str) {
   return crypto.createHash('sha256').update(str).digest('hex').toLowerCase();
 }
@@ -378,9 +383,12 @@ function getDefaultConfig() {
     settings: {
       webPort: PORT,
       keepAliveSeconds: 60,
+      pulseIntervalMinutes: 45,
       allowRegistration: false, // 默认不开放注册，必须由管理员后台手动开启
       defaultQuota: 2,         // 普通用户默认配额 2 台
       cron: {
+        executeTime: '01:20',
+        enableSubCron: false,
         signCron: '0 2 * * *',
         aiChatCron: '0 3,20 * * *',
         cloudHangCron: '0 4,6 * * *',
@@ -473,7 +481,7 @@ class CtYunClient {
     this.account = account;
     this.version = '103020001';
     this.deviceType = '60';
-    this.loginInfo = null;
+    this.loginInfo = account.savedLoginInfo || null;
     this.ws = null;
     this.wsAlive = false;
     this.encryptor = new CtYunEncryption();
@@ -499,6 +507,34 @@ class CtYunClient {
     this.endCurrentSession = null;
     this.isWebUserActive = false; // 用户是否正在通过浏览器操作云电脑
     this.webUserActiveUntil = 0;
+    this.externalYieldUntil = 0; // 官方客户端抢占避让截止时间戳
+  }
+
+  // 检测今日挂机 1 小时任务是否已达成
+  isTodayHangTaskCompleted() {
+    const todayStr = getBeijingDateOnly();
+    // 1. 本地记录判定
+    if (this.account.stats?.lastHangTime && this.account.stats.lastHangTime.startsWith(todayStr)) {
+      return true;
+    }
+    // 2. 官方任务中心进度判定
+    if (this.metrics.officialTasks && this.metrics.officialTasks.length > 0) {
+      const hangTask = this.metrics.officialTasks.find(t => t.name.includes('使用1小时'));
+      if (hangTask && (hangTask.status === 2 || (hangTask.total > 0 && hangTask.current >= hangTask.total))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // 官方 App / PC 客户端抢占自愈：后台短暂让位后探测式恢复 (释放后脉冲从零重新计时)
+  yieldToExternalClient(durationMinutes = 2) {
+    const accName = this.account.name || this.account.user;
+    this.externalYieldUntil = Date.now() + durationMinutes * 60 * 1000;
+    appendLog('KeepAlive', `[${accName}] ⚡ 检测到官方客户端(App/PC)上线接入，后台长连接立即主动让位，每 ${durationMinutes} 分钟探测一次，从其释放后重新计算脉冲！`, 'info');
+    if (this.endCurrentSession) {
+      this.endCurrentSession('Yield to External Client');
+    }
   }
 
   // 用户点击浏览器访问云电脑时调用：立即主动断开后台保活连接，并保持避让让位
@@ -534,93 +570,81 @@ class CtYunClient {
     }
   }
 
-  async getCaptchaCode(user) {
-    if (!ocrEngine) ocrEngine = new DdddOcr();
-    const capUrl = `https://desk.ctyun.cn:8810/api/auth/client/captcha?height=36&width=85&userInfo=${user}&mode=auto&_t=${Date.now()}`;
-    const res = await fetch(capUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/137.0.0.0',
-        'ctg-devicetype': this.deviceType,
-        'ctg-version': this.version,
-        'ctg-devicecode': this.account.deviceCode,
-        'referer': 'https://pc.ctyun.cn/'
-      }
-    });
-    const buf = Buffer.from(await res.arrayBuffer());
-    const code = await ocrEngine.classification(buf);
-    return (code || '').trim();
-  }
-
-  async login(maxRetries = 4) {
+  // 手动/交互模式登录验证（提供验证码和 challengeId）
+  async loginWithCaptcha(captchaCode, challengeId, challengeCode) {
     const user = this.account.user;
     const password = this.account.password;
     const deviceCode = this.account.deviceCode;
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        const chalRes = await fetch('https://desk.ctyun.cn:8810/api/auth/client/genChallengeData', {
-          method: 'POST',
-          headers: {
-            'ctg-devicetype': this.deviceType,
-            'ctg-version': this.version,
-            'ctg-devicecode': deviceCode,
-            'Content-Type': 'application/json'
-          },
-          body: '{}'
-        });
-        const chalData = await chalRes.json();
-        if (chalData.code !== 0) throw new Error(chalData.msg || '获取验证码挑战失败');
+    const body = new URLSearchParams({
+      userAccount: user,
+      password: sha256(password + challengeCode),
+      sha256Password: sha256(sha256(password) + challengeCode),
+      challengeId,
+      captchaCode,
+      deviceCode,
+      deviceName: 'Chrome浏览器',
+      deviceType: this.deviceType,
+      deviceModel: 'Windows NT 10.0; Win64; x64',
+      appVersion: '3.2.0',
+      sysVersion: 'Windows NT 10.0; Win64; x64',
+      clientVersion: this.version
+    });
 
-        const { challengeCode, challengeId } = chalData.data;
-        const captchaCode = await this.getCaptchaCode(user);
+    const loginRes = await fetch('https://desk.ctyun.cn:8810/api/auth/client/login', {
+      method: 'POST',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/137.0.0.0',
+        'ctg-devicetype': this.deviceType,
+        'ctg-version': this.version,
+        'ctg-devicecode': deviceCode,
+        'referer': 'https://pc.ctyun.cn/',
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: body.toString()
+    });
 
-        const body = new URLSearchParams({
-          userAccount: user,
-          password: sha256(password + challengeCode),
-          sha256Password: sha256(sha256(password) + challengeCode),
-          challengeId,
-          captchaCode,
-          deviceCode,
-          deviceName: 'Chrome浏览器',
-          deviceType: this.deviceType,
-          deviceModel: 'Windows NT 10.0; Win64; x64',
-          appVersion: '3.2.0',
-          sysVersion: 'Windows NT 10.0; Win64; x64',
-          clientVersion: this.version
-        });
-
-        const loginRes = await fetch('https://desk.ctyun.cn:8810/api/auth/client/login', {
-          method: 'POST',
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/137.0.0.0',
-            'ctg-devicetype': this.deviceType,
-            'ctg-version': this.version,
-            'ctg-devicecode': deviceCode,
-            'referer': 'https://pc.ctyun.cn/',
-            'Content-Type': 'application/x-www-form-urlencoded'
-          },
-          body: body.toString()
-        });
-
-        const result = await loginRes.json();
-        if (result.code === 0 && result.data) {
-          this.loginInfo = result.data;
-          this.account.bound = !!result.data.bondedDevice;
-          return { success: true, data: result.data };
-        }
-
-        if (result.msg && (result.msg.includes('用户名或密码错误') || result.code === 51040)) {
-          return { success: false, error: '用户名或密码错误，请检查账号密码！' };
-        }
-
-        if (attempt < maxRetries) {
-          await new Promise(r => setTimeout(r, 800));
-        }
-      } catch (err) {
-        if (attempt === maxRetries) return { success: false, error: err.message };
-      }
+    const result = await loginRes.json();
+    if (result.code === 0 && result.data) {
+      this.loginInfo = result.data;
+      this.account.savedLoginInfo = result.data;
+      this.account.bound = !!result.data.bondedDevice;
+      this.account.sessionExpired = false;
+      saveConfig(appConfig);
+      return { success: true, data: result.data };
     }
-    return { success: false, error: '天翼云登录超时，请稍后重试' };
+
+    return { 
+      success: false, 
+      error: result.msg || '登录失败，请检查验证码或密码！',
+      code: result.code 
+    };
+  }
+
+  // 会话失效检测与 Webhook 告警机制
+  handleSessionExpired(reason = '登录凭据失效') {
+    const accName = this.account.name || this.account.user;
+    if (this.account.sessionExpired) return; // 避免重复触发风暴告警
+    this.account.sessionExpired = true;
+    this.account.stats = this.account.stats || {};
+    this.account.stats.keepAliveStatus = 'offline';
+    saveConfig(appConfig);
+
+    appendLog('Auth', `[${accName}] ⚠️ 登录会话完全失效 (${reason})，已停用自动重试并发出告警通知！`, 'error');
+    sendNotification(
+      appConfig.settings,
+      `⚠️ 天翼云账号凭据失效 - ${accName}`,
+      `账号【${accName}】的登录凭据已完全过期或失效 (${reason})。系统已自动停止无效重试，请前往 Web 控制台重新验证登录。`,
+      { account: accName, task: '凭据维护', status: '会话失效' }
+    );
+  }
+
+  async login(maxRetries = 1) {
+    if (this.loginInfo && !this.account.sessionExpired) {
+      return { success: true, data: this.loginInfo };
+    }
+    this.handleSessionExpired('会话已过期，需要人工验证登录');
+    return { success: false, error: '会话已过期，请在控制台输入验证码重新登录！' };
   }
 
   getSignedHeaders(customHeaders = {}) {
@@ -652,7 +676,7 @@ class CtYunClient {
 
       // 1. 优先使用全规格 pageDesktop 查询云电脑
       try {
-        const res = await fetch('https://desk.ctyun.cn:8810/api/desktop/client/pageDesktop', {
+        const res = await fetchWithTimeout('https://desk.ctyun.cn:8810/api/desktop/client/pageDesktop', {
           method: 'POST',
           headers: this.getSignedHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({
@@ -672,7 +696,7 @@ class CtYunClient {
 
       // 2. 官方备用兜底接口：api/desktop/client/list (覆盖所有自建、公有池与专属云电脑类型)
       try {
-        const resList = await fetch('https://desk.ctyun.cn:8810/api/desktop/client/list', {
+        const resList = await fetchWithTimeout('https://desk.ctyun.cn:8810/api/desktop/client/list', {
           method: 'GET',
           headers: this.getSignedHeaders()
         });
@@ -716,7 +740,7 @@ class CtYunClient {
       clientVersion: this.version
     });
 
-    const res = await fetch('https://desk.ctyun.cn:8810/api/desktop/client/connect', {
+    const res = await fetchWithTimeout('https://desk.ctyun.cn:8810/api/desktop/client/connect', {
       method: 'POST',
       headers: this.getSignedHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
       body: connBody.toString()
@@ -762,7 +786,7 @@ class CtYunClient {
     });
 
     try {
-      const res = await fetch('https://desk.ctyun.cn:8810/api/desktop/client/operate', {
+      const res = await fetchWithTimeout('https://desk.ctyun.cn:8810/api/desktop/client/operate', {
         method: 'POST',
         headers: this.getSignedHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
         body: form.toString()
@@ -815,7 +839,7 @@ class CtYunClient {
     if (!this.loginInfo) return;
 
     try {
-      const taskRes = await (await fetch('https://desk.ctyun.cn/selforder/api/marketing/userPoints/getTaskList', {
+      const taskRes = await (await fetchWithTimeout('https://desk.ctyun.cn/selforder/api/marketing/userPoints/getTaskList', {
         headers: this.getSignedHeaders()
       })).json();
 
@@ -859,7 +883,7 @@ class CtYunClient {
         }
       }
 
-      const pointRes = await (await fetch('https://desk.ctyun.cn/selforder/api/marketing/userPoints/getUserPoints', {
+      const pointRes = await (await fetchWithTimeout('https://desk.ctyun.cn/selforder/api/marketing/userPoints/getUserPoints', {
         headers: this.getSignedHeaders()
       })).json();
 
@@ -878,7 +902,7 @@ class CtYunClient {
 
   async getRewards() {
     if (!this.loginInfo) await this.login();
-    const res = await fetch('https://desk.ctyun.cn/selforder/api/selforder/prod/get?prodId=17000000&prodCode=POINTS', {
+    const res = await fetchWithTimeout('https://desk.ctyun.cn/selforder/api/selforder/prod/get?prodId=17000000&prodCode=POINTS', {
       headers: this.getSignedHeaders()
     });
     const data = await res.json();
@@ -925,8 +949,18 @@ class CtYunClient {
       try {
         // 只有当用户在界面上手动把保活开关关闭，才退出守护循环
         if (this.account.features?.keepAlive === false) {
+          appendLog('KeepAlive', `[${accName}] 保活开关已关闭，守护循环退出 (重新开启开关或重启保活即可恢复)。`, 'info');
           this.stopKeepAliveWorker();
           break;
+        }
+
+        // 如果凭证已完全失效，停止无效重连死循环，等待用户在 Web 界面重新输入验证码登录
+        if (this.account.sessionExpired || !this.loginInfo) {
+          this.metrics.status = 'offline';
+          this.metrics.lastHeartbeatResult = '⚠️ 登录会话已过期，请在卡片点击【重新验证】输入验证码！';
+          if (this.account.stats) this.account.stats.keepAliveStatus = 'offline';
+          await new Promise(r => setTimeout(r, 15000));
+          continue;
         }
 
         // 若当前用户正在通过网页浏览器直连操控云电脑，后台保活保持静默避让，绝不建连争抢 Session！
@@ -939,6 +973,17 @@ class CtYunClient {
           } else {
             this.isWebUserActive = false;
           }
+        }
+
+        // 外部设备（官方手机 App / PC 客户端）抢占自愈避让机制：若检测到外部登录冲突，自动避让
+        if (this.externalYieldUntil && Date.now() < this.externalYieldUntil) {
+          const waitMinutesLeft = Math.ceil((this.externalYieldUntil - Date.now()) / 60000);
+          this.metrics.status = 'online';
+          this.metrics.lastHeartbeatResult = `外部设备（官方App/PC）使用中，自愈让位等待中 (剩余 ${waitMinutesLeft} 分钟)`;
+          await new Promise(r => setTimeout(r, 15000));
+          continue;
+        } else {
+          this.externalYieldUntil = 0;
         }
 
         // 1. 查询云电脑当前最新状态
@@ -959,18 +1004,33 @@ class CtYunClient {
 
         const isRunning = desktop && (desktop.useStatusText === '运行中' || desktop.useStatus == 25);
 
-        // 2. 如果云电脑未处于运行中（已关机 / 正在启动排队）：
-        // 按照用户要求：只要保活按钮开启，绝对保持持久监测，绝不退出！
-        // 前 5 分钟每隔 20 秒高频监测一次；5 分钟后转为 10 分钟一次持久巡检，随时响应外部开机自启！
+        // 2. 未运行处理：区分"用户主动关机"与"天翼云闲置自动休眠"，非主动关机一律自动唤醒！
         if (!isRunning) {
+          if (!this.account.manualShutdown) {
+            // 天翼云断开连接1小时后会自动休眠/关机，此处通过官方电源协议 (operationType:1) 自动唤醒
+            this.metrics.status = 'offline';
+            this.metrics.lastHeartbeatResult = `云电脑 [${desktop.useStatusText || '未启动'}]，正在自动唤醒...`;
+            appendLog('KeepAlive', `[${accName}] 检测到云电脑处于 [${desktop.useStatusText || '未启动'}] 状态 (天翼云断开1小时自动休眠机制)，正在自动下发唤醒指令...`, 'info');
+            try {
+              await this.controlPower(desktopId, 'poweron');
+              appendLog('KeepAlive', `[${accName}] ✅ 唤醒指令已下发成功，等待启动就绪 (30秒后重新探测)...`, 'success');
+            } catch (e) {
+              appendLog('KeepAlive', `[${accName}] 唤醒指令下发异常: ${e.message}，30秒后自动重试`, 'warning');
+            }
+            await new Promise(r => setTimeout(r, 30000));
+            continue;
+          }
+
+          // 用户主动关机：尊重用户意愿不唤醒，仅保持持久监测
+          // 前 5 分钟每隔 20 秒高频监测一次；5 分钟后转为 10 分钟一次持久巡检，随时响应外部开机自启！
           this.metrics.status = 'offline';
-          this.metrics.lastHeartbeatResult = `云电脑处于 [${desktop.useStatusText || '未启动'}] 状态，后台持续监测就绪中...`;
-          
+          this.metrics.lastHeartbeatResult = `云电脑处于 [${desktop.useStatusText || '未启动'}] 状态 (主动关机)，后台持续监测中...`;
+
           this.bootWaitStartTime = this.bootWaitStartTime || Date.now();
           const elapsedSec = Math.floor((Date.now() - this.bootWaitStartTime) / 1000);
-          
+
           if (elapsedSec < 300) {
-            appendLog('KeepAlive', `[${accName}] 云电脑处于 [${desktop.useStatusText || '未启动'}] 状态，正在以 20s 频率持续监测就绪 (${elapsedSec}s/300s)...`, 'info');
+            appendLog('KeepAlive', `[${accName}] 云电脑处于 [${desktop.useStatusText || '未启动'}] 状态 (主动关机)，以 20s 频率持续监测 (${elapsedSec}s/300s)...`, 'info');
             await new Promise(r => setTimeout(r, 20000));
           } else {
             appendLog('KeepAlive', `[${accName}] 云电脑未启动，进入长效持久监测守护 (每 10 分钟探测一次，随时响应外部开机)...`, 'info');
@@ -982,15 +1042,37 @@ class CtYunClient {
         // 3. 云电脑已处于运行中，重置启动等待计时
         this.bootWaitStartTime = null;
 
+        // 智能分时保活：任务未达标 → 持续挂机累加时长；任务已达标 → 脉冲模式 (短暂连接防休眠，其余时间通道空闲)
+        const todayHangDone = this.isTodayHangTaskCompleted();
+        if (todayHangDone) {
+          this.metrics.status = 'online';
+          if (this.account.stats) this.account.stats.keepAliveStatus = 'online';
+        }
+
         const keepSeconds = appConfig.settings?.keepAliveSeconds || 60;
         this.metrics.keepAliveSeconds = keepSeconds;
-        appendLog('Heartbeat', `[${accName}] === 新保活周期开始 (设定保持: ${keepSeconds}秒) ===`, 'info');
+        appendLog('Heartbeat', `[${accName}] === 新保活周期开始 (${todayHangDone ? '今日任务已达标 · 脉冲防休眠模式' : '任务进行中 · 挂机模式'}，连接保持: ${keepSeconds}秒) ===`, 'info');
 
         // 4. 获取长连接视讯流配置 (开机后网关就绪可能有轻微延迟，温和重试多次)
         let desktopInfo = null;
+        let lastConnError = '';
         for (let connAttempt = 1; connAttempt <= 5; connAttempt++) {
-          desktopInfo = await this.connect(desktopId);
+          try {
+            desktopInfo = await this.connect(desktopId);
+          } catch (e) {
+            lastConnError = e.message || '';
+          }
           if (desktopInfo && desktopInfo.clinkLvsOutHost) break;
+          // 外部客户端占用探测：官方App/PC/浏览器正在使用时，天翼云会拒绝新连接，让位等待其释放
+          if (lastConnError.includes('其他设备') || lastConnError.includes('其他地方') || lastConnError.includes('正在使用') ||
+              lastConnError.includes('占用') || lastConnError.includes('稍后再试') || lastConnError.includes('使用中')) {
+            this.metrics.status = 'online';
+            this.metrics.lastHeartbeatResult = '外部客户端 (官方App/PC/浏览器) 使用中，脉冲让位等待，将从其释放断开后重新计时';
+            appendLog('KeepAlive', `[${accName}] 检测到云电脑正被外部客户端占用 (${lastConnError})，脉冲让位每2分钟探测，从释放后重新计时...`, 'info');
+            this.externalYieldUntil = Date.now() + 2 * 60 * 1000;
+            await new Promise(r => setTimeout(r, 15000));
+            break;
+          }
           if (connAttempt < 5) {
             appendLog('KeepAlive', `[${accName}] 云电脑已开机，视讯网关就绪排队中 (${connAttempt * 5}s/25s)...`, 'info');
             await new Promise(r => setTimeout(r, 5000));
@@ -998,6 +1080,9 @@ class CtYunClient {
         }
 
         if (!desktopInfo || !desktopInfo.clinkLvsOutHost) {
+          if (this.externalYieldUntil && Date.now() < this.externalYieldUntil) {
+            continue;
+          }
           appendLog('KeepAlive', `[${accName}] 视讯网关暂未分配完毕，20秒后自动重新探测连接...`, 'warning');
           await new Promise(r => setTimeout(r, 20000));
           continue;
@@ -1229,8 +1314,22 @@ class CtYunClient {
                     }
                   }, 5000);
 
-                  // 刷新官方任务与积分进度
-                  setTimeout(() => this.refreshOfficialTasks(), 2500);
+                  // 刷新官方任务与积分进度；若已达标 1 小时，立即优雅让位断开
+                  setTimeout(async () => {
+                    await this.refreshOfficialTasks();
+                    if (this.isTodayHangTaskCompleted()) {
+                      appendLog('KeepAlive', `[${accName}] 🎉 今日使用 AI 云电脑 1 小时任务已圆满达成，后台长连接立即主动让位关闭，释放通道给官方 APP！`, 'success');
+                      endSession('Today Hang Goal Achieved');
+                    }
+                  }, 2500);
+                }
+
+                // 核心协议检测：收到服务端 Type 119 (CLINK_MSG_MAIN_CLIENT_OFFLINE) 或强制下线信号
+                // 代表官方手机 App / PC 端正在登录或发生抢占，后台长连接光速让位
+                if (type === 119 || type === 120 || type === 137) {
+                  appendLog('KeepAlive', `[${accName}] 收到云电脑客户端状态通知 (${type})，主动避让官方客户端...`, 'info');
+                  this.yieldToExternalClient(20);
+                  return;
                 }
               }
             } catch (err) {
@@ -1245,13 +1344,55 @@ class CtYunClient {
           });
 
           this.ws.on('close', (code, reason) => {
-            appendLog('Heartbeat', `[${accName}] 保活长连接正常关闭 (${code} - ${reason || '正常轮转'})`, 'info');
+            const reasonStr = String(reason || '');
+            // 收到 1000/1001/4000 等异常断开或被踢提示，判断是否为外部客户端抢占
+            if (code === 1000 || code === 1001 || code === 4001 || reasonStr.includes('preempt') || reasonStr.includes('conflict')) {
+              appendLog('KeepAlive', `[${accName}] 检测到外部设备正在登入云电脑 (状态码: ${code})，后台主动让位 20 分钟！`, 'info');
+              this.yieldToExternalClient(20);
+            } else {
+              appendLog('Heartbeat', `[${accName}] 保活长连接正常关闭 (${code} - ${reason || '正常轮转'})`, 'info');
+            }
             endSession('Closed');
           });
         });
 
         await this.refreshOfficialTasks();
-        await new Promise(r => setTimeout(r, 2000));
+
+        // 脉冲间隔待机：任务已达标时，连接结束后长时间空闲
+        // 按用户设定的"脉冲保活间隔 (分钟)"进行短暂真实连接，重置天翼云"断开1小时自动休眠"计时器
+        // 期间若检测到浏览器/官方客户端占用，脉冲计时立即暂停并在其释放后从零重新计算！
+        if (todayHangDone) {
+          const pulseGapSec = Math.min(55, Math.max(5, parseInt(appConfig.settings?.pulseIntervalMinutes) || 45)) * 60;
+          let waited = 0;
+          while (waited < pulseGapSec && this.workerRunning) {
+            if (this.account.sessionExpired) break;
+
+            // 页面探针超时未续约 (浏览器异常关闭)，视为已释放
+            if (this.isWebUserActive && Date.now() >= this.webUserActiveUntil) {
+              this.isWebUserActive = false;
+            }
+
+            // 占用检测：浏览器访问中 → 暂停倒计时，其关闭释放后从零重新计时
+            if (this.isWebUserActive && Date.now() < this.webUserActiveUntil) {
+              this.metrics.lastHeartbeatResult = '浏览器访问云电脑中，脉冲计时已暂停，将从其关闭断开后重新计算';
+              await new Promise(r => setTimeout(r, 10000));
+              waited = 0;
+              continue;
+            }
+
+            // 外部客户端 (官方App/PC) 避让期 → 退出待机循环，转入探测模式直至其释放后重新脉冲计时
+            if (this.externalYieldUntil && Date.now() < this.externalYieldUntil) {
+              this.metrics.lastHeartbeatResult = '外部客户端 (官方App/PC) 使用中，脉冲让位等待，将从其释放断开后重新计时';
+              break;
+            }
+
+            this.metrics.lastHeartbeatResult = `🟢 脉冲保活待机中 (约 ${Math.ceil((pulseGapSec - waited) / 60)} 分钟后短暂连接刷新在线，通道空闲不影响官方App)`;
+            await new Promise(r => setTimeout(r, 60000));
+            waited += 60;
+          }
+        } else {
+          await new Promise(r => setTimeout(r, 2000));
+        }
 
       } catch (err) {
         appendLog('KeepAlive', `[${accName}] 保活异常: ${err.message}，10秒后重试...`, 'error');
@@ -1302,7 +1443,6 @@ const taskScheduler = new TaskScheduler({
   getAccounts: () => appConfig.accounts,
   getSettings: () => appConfig.settings,
   getClient: (acc) => getClient(acc),
-  ocrEngine,
   appendLog: (src, msg, lvl) => appendLog(src, msg, lvl),
   sendNotification: (settings, title, content) => sendNotification(settings, title, content),
   saveConfig: () => saveConfig(appConfig)
@@ -1501,9 +1641,12 @@ const server = http.createServer(async (req, res) => {
       client.yieldToWebUser(60);
 
       const authDataObj = {
+        ...client.loginInfo,
         logined: true,
         userId: client.loginInfo?.userId,
         userName: client.loginInfo?.userName,
+        userEid: client.loginInfo?.userEid || '',
+        userAccount: client.loginInfo?.userAccount || '',
         mobilephone: client.loginInfo?.mobilephone || acc.user,
         tenantId: client.loginInfo?.tenantId,
         secretKey: client.loginInfo?.secretKey,
@@ -1526,7 +1669,12 @@ const server = http.createServer(async (req, res) => {
     localStorage.setItem('web_device_code', deviceCode);
     localStorage.setItem('authExpiredAt', expiredAt);
     localStorage.setItem('authData', JSON.stringify(authData));
+    localStorage.setItem('judgeUserEId', authData.userEid || '');
     localStorage.setItem('loginAt', Date.now().toString());
+    sessionStorage.setItem('authExpiredAt', expiredAt);
+    sessionStorage.setItem('authData', JSON.stringify(authData));
+    sessionStorage.setItem('user_name', authData.userName || '');
+    sessionStorage.setItem('userId', String(authData.userId || ''));
   } catch (e) {
     console.error('Failed to set localStorage', e);
   }
@@ -2124,8 +2272,17 @@ const server = http.createServer(async (req, res) => {
     const name = (body.name || user).trim();
     const devCode = (body.deviceCode || '').trim() || generateDeviceCode();
 
+    const captchaCode = (body.captchaCode || '').trim();
+    const challengeId = (body.challengeId || '').trim();
+    const challengeCode = (body.challengeCode || '').trim();
+
     if (!user || !pwd) {
       jsonResponse(res, { error: '账号和密码不能为空' }, 400);
+      return;
+    }
+
+    if (!captchaCode || !challengeId || !challengeCode) {
+      jsonResponse(res, { error: '图形验证码已失效或未填写，请刷新验证码后重试！' }, 400);
       return;
     }
 
@@ -2133,11 +2290,11 @@ const server = http.createServer(async (req, res) => {
 
     const tempAccount = { user, password: pwd, deviceCode: devCode };
     const tempClient = new CtYunClient(tempAccount);
-    const logRes = await tempClient.login(4);
+    const logRes = await tempClient.loginWithCaptcha(captchaCode, challengeId, challengeCode);
 
     if (!logRes.success) {
       appendLog('Auth', `[${name}] 登录校验被拒绝: ${logRes.error}`, 'error');
-      jsonResponse(res, { error: logRes.error || '用户名或密码错误，请检查！' }, 400);
+      jsonResponse(res, { error: logRes.error || '验证码或账号密码错误，请检查！' }, 400);
       return;
     }
 
@@ -2241,6 +2398,22 @@ const server = http.createServer(async (req, res) => {
       acc.manualShutdown = false;
     }
 
+    // 支持输入验证码重新激活登录
+    if (body.captchaCode && body.challengeId && body.challengeCode) {
+      appendLog('Auth', `[${acc.name}] 正在提交用户输入的验证码重新校验天翼云登录态...`, 'info');
+      const client = getClient(acc);
+      const logRes = await client.loginWithCaptcha(body.captchaCode, body.challengeId, body.challengeCode);
+      if (!logRes.success) {
+        jsonResponse(res, { error: logRes.error || '验证码或密码校验失败' }, 400);
+        return;
+      }
+      acc.bound = !!logRes.data.bondedDevice;
+      acc.sessionExpired = false;
+      appendLog('Auth', `[${acc.name}] 🎉 重新验证登录成功，凭证已刷新！`, 'success');
+      // 立即同步官方任务中心与积分，确保前端看板即时呈现
+      await client.refreshOfficialTasks();
+    }
+
     saveConfig(appConfig);
     appendLog('System', `已更新账号配置: ${acc.name}`, 'info');
 
@@ -2312,13 +2485,62 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 11. 生成设备码
-  if (req.method === 'POST' && pathname === '/api/device/generate') {
+  // 10.5 代理获取天翼云官方图形验证码与挑战数据 (人工输码模式)
+  if (req.method === 'GET' && pathname.startsWith('/api/captcha/')) {
     const session = getSessionFromReq(req);
     if (!session) {
       jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
       return;
     }
+
+    const phone = pathname.split('/')[3] || '';
+    const deviceCode = parsedUrl.searchParams.get('deviceCode') || generateDeviceCode();
+
+    try {
+      // 1. 获取 Challenge Code
+      const chalRes = await fetch('https://desk.ctyun.cn:8810/api/auth/client/genChallengeData', {
+        method: 'POST',
+        headers: {
+          'ctg-devicetype': '60',
+          'ctg-version': '103020001',
+          'ctg-devicecode': deviceCode,
+          'Content-Type': 'application/json'
+        },
+        body: '{}'
+      });
+      const chalData = await chalRes.json();
+      if (chalData.code !== 0) throw new Error(chalData.msg || '获取验证码挑战失败');
+
+      const { challengeCode, challengeId } = chalData.data;
+
+      // 2. 拉取官方图形验证码图片流并转为 Base64
+      const capUrl = `https://desk.ctyun.cn:8810/api/auth/client/captcha?height=36&width=85&userInfo=${encodeURIComponent(phone)}&mode=auto&_t=${Date.now()}`;
+      const capRes = await fetch(capUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/137.0.0.0',
+          'ctg-devicetype': '60',
+          'ctg-version': '103020001',
+          'ctg-devicecode': deviceCode,
+          'referer': 'https://pc.ctyun.cn/'
+        }
+      });
+      const imgBuf = Buffer.from(await capRes.arrayBuffer());
+      const base64Img = `data:image/jpeg;base64,${imgBuf.toString('base64')}`;
+
+      jsonResponse(res, {
+        success: true,
+        challengeCode,
+        challengeId,
+        captchaImage: base64Img
+      });
+    } catch (e) {
+      jsonResponse(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
+  // 11. 生成设备码
+  if (req.method === 'POST' && pathname === '/api/device/generate') {
     jsonResponse(res, { deviceCode: generateDeviceCode() });
     return;
   }
@@ -2343,11 +2565,17 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    const body = await parseJsonBody(req);
+    const captchaCode = (body.captchaCode || '').trim();
+    if (!captchaCode) {
+      jsonResponse(res, { error: '请先输入图形验证码后再获取短信验证码！' }, 400);
+      return;
+    }
+
     const client = getClient(acc);
     try {
       appendLog('Auth', `[${acc.name}] 正在请求天翼云下发设备绑定验证码...`, 'info');
-      const capCode = await client.getCaptchaCode(acc.user);
-      const url = `https://desk.ctyun.cn:8810/api/cdserv/client/device/getSmsCode?mobilePhone=${acc.user}&captchaCode=${capCode}`;
+      const url = `https://desk.ctyun.cn:8810/api/cdserv/client/device/getSmsCode?mobilePhone=${acc.user}&captchaCode=${encodeURIComponent(captchaCode)}`;
       const resSms = await fetch(url, { headers: client.getSignedHeaders() });
       const dataSms = await resSms.json();
       if (dataSms.code === 0) {
@@ -2602,6 +2830,7 @@ const server = http.createServer(async (req, res) => {
       const formatted = list.map(d => ({
         desktopId: d.objId || d.desktopId,
         desktopName: d.objName || d.desktopName || '云电脑',
+        prodInstId: d.prodInstId || '',
         useStatusText: d.useStatusText || '运行中'
       }));
       jsonResponse(res, formatted);
@@ -2655,9 +2884,12 @@ const server = http.createServer(async (req, res) => {
 
       // 构造免密直达认证包 (localStorage.authData + web_device_code + authExpiredAt)
       const authDataObj = {
+        ...client.loginInfo,
         logined: true,
         userId: client.loginInfo?.userId,
         userName: client.loginInfo?.userName,
+        userEid: client.loginInfo?.userEid || '',
+        userAccount: client.loginInfo?.userAccount || '',
         mobilephone: client.loginInfo?.mobilephone || acc.user,
         tenantId: client.loginInfo?.tenantId,
         secretKey: client.loginInfo?.secretKey,
@@ -2729,19 +2961,40 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      appendLog('Redeem', `[${acc.name}] 正在向天翼云发起真实下单: ${prodName} x${times}，消耗 ${totalCost} 积分...`, 'info');
+      // 查询绑定的云电脑详情（若为升配商品，需携带实例信息）
+      let targetProdInstId = body.prodInstId || '';
+      if (!targetProdInstId && desktopId) {
+        try {
+          const desktops = await client.getDesktops();
+          const d = desktops.find(item => String(item.objId || item.desktopId) === String(desktopId));
+          if (d && d.prodInstId) targetProdInstId = d.prodInstId;
+        } catch (e) {}
+      }
+
+      // 天翼云 PaaS 商城 placeOrder 规约构建 SKU 属性
+      // 1. pointsdiskupgrade（数据盘）及普通兑换类商品：官方前端 attrs 为空数组 []，由商城发货兑换凭证/券码
+      // 2. pointstplupgrade（升配包）：若指定云电脑，提供目标实例 ID
+      const skuAttrs = [];
+      if (prodType === 'pointstplupgrade' && (targetProdInstId || desktopId)) {
+        skuAttrs.push({
+          attrKey: targetProdInstId ? 'prodInstId' : 'bindDesktopId',
+          attrVal: String(targetProdInstId || desktopId)
+        });
+      }
+
+      appendLog('Redeem', `[${acc.name}] 正在向天翼云发起真实下单: ${prodName} x${times}，消耗 ${totalCost} 积分 (商品类型: ${prodType})...`, 'info');
 
       const placeOrderUrl = 'https://desk.ctyun.cn/selforder/api/selforder/paas/placeOrder';
       const orderPayload = {
         busiChannel: '010',
         orderType: 1,
-        pointType: 1,
+        pointType: prodId >= 18000000 ? 500 : 1, // 天翼云积分类型：MBPOINTS对应500，POINTS通用积分对应1
         points: totalCost,
         sku: Array.from({ length: times }).map((_, idx) => ({
           execSort: idx + 1,
           prodId,
           prodType,
-          attrs: desktopId ? [{ attrKey: 'bindDesktopId', attrVal: desktopId }] : []
+          attrs: skuAttrs
         }))
       };
 
@@ -2762,8 +3015,24 @@ const server = http.createServer(async (req, res) => {
         );
         jsonResponse(res, { success: true, message: `兑换成功！消耗 ${totalCost} 积分，剩余 ${client.metrics.userPoints} 积分` });
       } else {
-        appendLog('Redeem', `[${acc.name}] 下单失败: ${orderData.msg || '未知错误'}`, 'error');
-        jsonResponse(res, { error: `兑换失败(${orderData.code}): ${orderData.msg || '未知原因'}` }, 400);
+        let errorReason = '';
+        const msg = orderData.msg || '';
+        if (msg.includes('风控') || orderData.code === 400) {
+          errorReason = '【触发天翼云反欺诈风控】原因：此前存在短时间内多次提交非法参数或超额积分请求，已被天翼云风控系统临时拦截。请使用天翼云电脑官方手机 APP 登录该账号进行一次常规操作（或短信验证）即可自动解除风控！';
+        } else if (msg.includes('unknow instType') || msg.includes('add subsku')) {
+          errorReason = `【商品属性不匹配】原因：该商品(${prodType})为独立发放型商品，无法直接作为云电脑子配置进行硬件绑定。已重置为商城直发规范。`;
+        } else if (msg.includes('目标资源不存在')) {
+          errorReason = '【目标资源不存在】原因：未找到绑定的云电脑实例或实例未运行，请先在电源管理确认开机后再进行硬件升配。';
+        }
+
+        const fullLog = `下单失败: ${msg}${errorReason ? ' -> ' + errorReason : ''}`;
+        appendLog('Redeem', `[${acc.name}] ${fullLog}`, 'error');
+        jsonResponse(res, { 
+          error: `兑换失败(${orderData.code}): ${msg}`,
+          reason: errorReason || '天翼云服务接口返回异常',
+          rawCode: orderData.code,
+          rawMsg: msg
+        }, 400);
       }
     } catch (e) {
       jsonResponse(res, { error: `下单请求异常: ${e.message}` }, 500);

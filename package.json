@@ -4,8 +4,6 @@
   "description": "天翼云电脑可视化多账号保活控制中心",
   "main": "server.js",
   "dependencies": {
-    "jimp": "^1.6.0",
-    "onnxruntime-node": "^1.21.0",
     "ws": "^8.21.3"
   }
 }
