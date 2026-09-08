@@ -755,18 +755,20 @@ class CtYunClient {
     throw new Error(json.msg || '获取云电脑连接配置失败');
   }
 
-  // 云电脑电源管理操作 (开机: start / 重启: reboot / 关机: shutdown)
-  // 云电脑电源管理操作 (开机: operationType 1 / 关机: operationType 2 / 重启: operationType 3)
+  // 云电脑电源管理操作 (开机: operationType 1 / 唤醒: operationType 18 / 关机: operationType 2 / 重启: operationType 3)
   async controlPower(desktopId, action) {
     const accName = this.account.name || this.account.user;
     const actionLower = (action || '').toLowerCase();
 
-    // 天翼云底层官方电源管控协议 operationType: 1=开机(ON), 2=关机(SHUTDOWN), 3=重启(RESET)
+    // 天翼云底层官方电源管控协议 operationType: 1=开机(ON), 18=唤醒(AWAKE), 2=关机(SHUTDOWN), 3=重启(RESET)
     let opType = 3;
     let actionCn = '重启';
-    if (actionLower === 'poweron' || actionLower === 'start' || actionLower === 'awake') {
+    if (actionLower === 'poweron' || actionLower === 'start') {
       opType = 1;
-      actionCn = '开机/唤醒';
+      actionCn = '开机';
+    } else if (actionLower === 'awake' || actionLower === 'wakeup' || actionLower === 'resume') {
+      opType = 18;
+      actionCn = '唤醒';
     } else if (actionLower === 'shutdown' || actionLower === 'poweroff') {
       opType = 2;
       actionCn = '关机';
@@ -782,19 +784,93 @@ class CtYunClient {
       if (!logRes.success) throw new Error(logRes.error || '登录鉴权失败');
     }
 
-    const form = new URLSearchParams({
-      desktopId: String(desktopId),
-      operationType: String(opType)
-    });
-
-    try {
+    // 执行电源指令
+    const sendOperate = async (targetOpType) => {
+      const form = new URLSearchParams({
+        desktopId: String(desktopId),
+        operationType: String(targetOpType)
+      });
       const res = await fetchWithTimeout('https://desk.ctyun.cn:8810/api/desktop/client/operate', {
         method: 'POST',
         headers: this.getSignedHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
         body: form.toString()
       });
+      return await res.json();
+    };
 
-      const data = await res.json();
+    // 开机/唤醒双重信令链路 (Triple Link)
+    if (opType === 1 || opType === 18) {
+      let lastErrMsg = '';
+      
+      // 1. 尝试主信令 (1 或 18)
+      try {
+        const data1 = await sendOperate(opType);
+        if (data1.code === 0) {
+          appendLog('System', `[${accName}] ✅ 云电脑【${actionCn}】指令已成功生效！`, 'success');
+          return { success: true, message: `云电脑【${actionCn}】指令已成功下发！官方已确认启动。` };
+        }
+        lastErrMsg = data1.msg || `错误码 ${data1.code}`;
+      } catch (e) {
+        lastErrMsg = e.message;
+      }
+
+      // 2. 若主信令未成功，尝试互补信令 (18 ↔ 1)
+      const altOpType = (opType === 1) ? 18 : 1;
+      const altCn = (altOpType === 18) ? '唤醒' : '开机';
+      try {
+        const data2 = await sendOperate(altOpType);
+        if (data2.code === 0) {
+          appendLog('System', `[${accName}] ✅ 云电脑【${altCn}】互补指令已成功生效！`, 'success');
+          return { success: true, message: `云电脑【${altCn}】指令已成功下发！官方已确认启动。` };
+        }
+        lastErrMsg = data2.msg || lastErrMsg;
+      } catch (e) {
+        lastErrMsg = e.message || lastErrMsg;
+      }
+
+      // 3. 通用开机信令通道：调用 connect 触发天翼云网关自动拉起虚拟机 (goingRetry: true)
+      try {
+        const connBody = new URLSearchParams({
+          objId: String(desktopId),
+          objType: '0',
+          osType: '15',
+          deviceId: this.deviceType,
+          vdCommand: '',
+          ipAddress: '',
+          macAddress: '',
+          deviceCode: this.account.deviceCode,
+          deviceName: 'Chrome浏览器',
+          deviceType: this.deviceType,
+          deviceModel: 'Windows NT 10.0; Win64; x64',
+          appVersion: '3.2.0',
+          sysVersion: 'Windows NT 10.0; Win64; x64',
+          clientVersion: this.version
+        });
+        const connRes = await fetchWithTimeout('https://desk.ctyun.cn:8810/api/desktop/client/connect', {
+          method: 'POST',
+          headers: this.getSignedHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+          body: connBody.toString()
+        });
+        const connData = await connRes.json();
+        if (connData.code === 0 && connData.data?.goingRetry) {
+          appendLog('System', `[${accName}] ✅ 云电脑通用启动信令已触发 (goingRetry: true)，云端正在开机...`, 'success');
+          return { success: true, message: '云电脑开机信令已同步触发，云端正在启动中！' };
+        }
+      } catch (e) {}
+
+      // 机器已经在运行中的容错提示
+      if (lastErrMsg && (lastErrMsg.includes('运行中') || lastErrMsg.includes('正在进行') || lastErrMsg.includes('已经开机'))) {
+        appendLog('System', `[${accName}] 云电脑已处于开机/运行状态中。`, 'info');
+        return { success: true, message: '云电脑已处于运行状态中！' };
+      }
+
+      appendLog('System', `[${accName}] ❌ 下发电源指令【${actionCn}】失败: ${lastErrMsg}`, 'error');
+      return { success: false, error: lastErrMsg || '官方接口未确认开机' };
+    }
+
+    // 关机 / 重启
+    try {
+      const data = await sendOperate(opType);
       if (data.code === 0) {
         appendLog('System', `[${accName}] ✅ 云电脑【${actionCn}】指令已成功生效！官方返回: 成功`, 'success');
         sendNotification(
@@ -802,20 +878,11 @@ class CtYunClient {
           `⚡ 云电脑电源控制生效 - ${accName}`,
           `已成功向云电脑 [${accName}] 下达【${actionCn}】电源指令，天翼云已确认执行。`
         );
-        let successMsg = `云电脑【${actionCn}】指令已成功下发并生效！`;
-        if (opType === 1) {
-          successMsg = `云电脑【开机】指令已成功下达天翼云网关！正在开机启动中，后台将持续监听就绪状态并自动上线保活。`;
-        }
-        return { success: true, message: successMsg };
+        return { success: true, message: `云电脑【${actionCn}】指令已成功下发并生效！` };
       } else {
         throw new Error(data.msg || `错误码 ${data.code}`);
       }
     } catch (e) {
-      // 容错处理：天翼云返回“只有已关机状态的AI云电脑允许进行开机操作”或机器正在开机中
-      if (opType === 1 && e.message && (e.message.includes('只有已关机') || e.message.includes('正在进行') || e.message.includes('运行中'))) {
-        appendLog('System', `[${accName}] 云电脑正在开机或已处于运行状态，已自动恢复保活准备。`, 'info');
-        return { success: true, message: '云电脑开机指令已同步，正在启动就绪中！' };
-      }
       appendLog('System', `[${accName}] ❌ 下发电源指令【${actionCn}】失败: ${e.message}`, 'error');
       return { success: false, error: e.message };
     }
@@ -1009,15 +1076,19 @@ class CtYunClient {
         // 2. 未运行处理：区分"用户主动关机"与"天翼云闲置自动休眠"，非主动关机一律自动唤醒！
         if (!isRunning) {
           if (!this.account.manualShutdown) {
-            // 天翼云断开连接1小时后会自动休眠/关机，此处通过官方电源协议 (operationType:1) 自动唤醒
+            // 天翼云断开连接1小时后会自动休眠/关机，此处通过官方多重信令 (operationType: 1/18/connect) 自动唤醒
             this.metrics.status = 'offline';
-            this.metrics.lastHeartbeatResult = `云电脑 [${desktop.useStatusText || '未启动'}]，正在自动唤醒...`;
-            appendLog('KeepAlive', `[${accName}] 检测到云电脑处于 [${desktop.useStatusText || '未启动'}] 状态 (天翼云断开1小时自动休眠机制)，正在自动下发唤醒指令...`, 'info');
-            try {
-              await this.controlPower(desktopId, 'poweron');
-              appendLog('KeepAlive', `[${accName}] ✅ 唤醒指令已下发成功，等待启动就绪 (30秒后重新探测)...`, 'success');
-            } catch (e) {
-              appendLog('KeepAlive', `[${accName}] 唤醒指令下发异常: ${e.message}，30秒后自动重试`, 'warning');
+            const isDormant = (desktop.useStatusText || '').includes('休眠') || (desktop.useStatusText || '').includes('睡眠');
+            const actionTarget = isDormant ? 'awake' : 'poweron';
+            const actionCn = isDormant ? '唤醒' : '开机';
+            this.metrics.lastHeartbeatResult = `云电脑 [${desktop.useStatusText || '未启动'}]，正在自动下发${actionCn}...`;
+            appendLog('KeepAlive', `[${accName}] 检测到云电脑处于 [${desktop.useStatusText || '未启动'}] 状态 (天翼云闲置自动休眠机制)，正在自动下发${actionCn}指令...`, 'info');
+
+            const wakeRes = await this.controlPower(desktopId, actionTarget);
+            if (wakeRes && wakeRes.success) {
+              appendLog('KeepAlive', `[${accName}] ✅ 云电脑【${actionCn}】指令已成功送达天翼云网关，等待启动就绪 (30秒后探测)...`, 'success');
+            } else {
+              appendLog('KeepAlive', `[${accName}] ❌ 云电脑【${actionCn}】指令下发失败: ${wakeRes?.error || '网关未确认'}，30秒后重试`, 'warning');
             }
             await new Promise(r => setTimeout(r, 30000));
             continue;
@@ -1044,16 +1115,20 @@ class CtYunClient {
         // 3. 云电脑已处于运行中，重置启动等待计时
         this.bootWaitStartTime = null;
 
-        // 智能分时保活：任务未达标 → 持续挂机累加时长；任务已达标 → 脉冲模式 (短暂连接防休眠，其余时间通道空闲)
+        // 智能分时保活决策：
+        // 只有当用户显式开启了该账号的【云电脑挂机1小时】(cloudHang === true) 且今日尚未达标时，才进入持续连线挂机模式；
+        // 否则（关闭了挂机开关，或者今日已满1小时），一律进入【脉冲防休眠模式】（只短暂连接后休眠 pulseIntervalMinutes 分钟，通道空闲不影响官方客户端）
+        const isCloudHangEnabled = this.account.features?.cloudHang === true;
         const todayHangDone = this.isTodayHangTaskCompleted();
-        if (todayHangDone) {
-          this.metrics.status = 'online';
-          if (this.account.stats) this.account.stats.keepAliveStatus = 'online';
-        }
+        const isHangMode = isCloudHangEnabled && !todayHangDone;
+
+        this.metrics.status = 'online';
+        if (this.account.stats) this.account.stats.keepAliveStatus = 'online';
 
         const keepSeconds = appConfig.settings?.keepAliveSeconds || 60;
         this.metrics.keepAliveSeconds = keepSeconds;
-        appendLog('Heartbeat', `[${accName}] === 新保活周期开始 (${todayHangDone ? '今日任务已达标 · 脉冲防休眠模式' : '任务进行中 · 挂机模式'}，连接保持: ${keepSeconds}秒) ===`, 'info');
+        const modeLabel = isHangMode ? '持续挂机累加模式' : (todayHangDone ? '今日任务已达标 · 脉冲防休眠模式' : '未开启挂机 · 脉冲防休眠模式');
+        appendLog('Heartbeat', `[${accName}] === 新保活周期开始 (${modeLabel}，连接保持: ${keepSeconds}秒) ===`, 'info');
 
         // 4. 获取长连接视讯流配置 (开机后网关就绪可能有轻微延迟，温和重试多次)
         let desktopInfo = null;
@@ -1323,8 +1398,8 @@ class CtYunClient {
                     }
                   }, 5000);
 
-                  // 挂机模式下：持续连接累加秒数，每 20 秒巡检一次进度，真正达到 3600 秒 (1小时) 后立即让位
-                  if (!todayHangDone) {
+                  // 挂机模式下 (isHangMode)：持续连接累加秒数，每 20 秒巡检一次进度，真正达到 3600 秒 (1小时) 后立即让位
+                  if (isHangMode) {
                     const checkHangProgress = async () => {
                       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
                       await this.refreshOfficialTasks();
@@ -1351,6 +1426,10 @@ class CtYunClient {
                     // 连接后 2.5 秒检查一次，随后每 20 秒持续巡检
                     setTimeout(checkHangProgress, 2500);
                     hangCheckInterval = setInterval(checkHangProgress, 20000);
+                  } else {
+                    // 脉冲防休眠模式：不执行挂机时长累加，握手完成后正常维持本周期即可
+                    const pulseReason = todayHangDone ? '今日任务已达标' : '未开启挂机功能';
+                    this.metrics.lastHeartbeatResult = `脉冲保活连接中 (${pulseReason}，握手完成后通道将空闲给官方App)`;
                   }
                 }
 
@@ -1388,14 +1467,19 @@ class CtYunClient {
 
         await this.refreshOfficialTasks();
 
-        // 脉冲间隔待机：任务已达标时，连接结束后长时间空闲
-        // 按用户设定的"脉冲保活间隔 (分钟)"进行短暂真实连接，重置天翼云"断开1小时自动休眠"计时器
-        // 期间若检测到浏览器/官方客户端占用，脉冲计时立即暂停并在其释放后从零重新计算！
-        if (this.isTodayHangTaskCompleted()) {
+        // 脉冲模式决策：未开启挂机或挂机已达标时，长连接关闭后进入长时间脉冲休眠 (每 pulseIntervalMinutes 分钟短暂连接一次重置天翼云 1 小时休眠计时器)
+        // 挂机模式：短休 2 秒后立即进入下一轮连接，确保持续不间断挂机累加时长直至满 3600 秒达成！
+        if (!isHangMode) {
           const pulseGapSec = Math.min(55, Math.max(5, parseInt(appConfig.settings?.pulseIntervalMinutes) || 45)) * 60;
           let waited = 0;
           while (waited < pulseGapSec && this.workerRunning) {
             if (this.account.sessionExpired) break;
+
+            // 如果用户中途手动开启了【云电脑挂机1小时】，立即跳出脉冲休眠，切入持续挂机模式
+            if (this.account.features?.cloudHang === true && !this.isTodayHangTaskCompleted()) {
+              appendLog('KeepAlive', `[${accName}] 检测到用户已开启【云电脑挂机1小时】，立即切入持续连线挂机模式！`, 'info');
+              break;
+            }
 
             // 页面探针超时未续约 (浏览器异常关闭)，视为已释放
             if (this.isWebUserActive && Date.now() >= this.webUserActiveUntil) {
@@ -1416,7 +1500,8 @@ class CtYunClient {
               break;
             }
 
-            this.metrics.lastHeartbeatResult = `🟢 脉冲保活待机中 (约 ${Math.ceil((pulseGapSec - waited) / 60)} 分钟后短暂连接刷新在线，通道空闲不影响官方App)`;
+            const pulseReason = todayHangDone ? '今日任务已达标' : '未开启挂机功能';
+            this.metrics.lastHeartbeatResult = `🟢 脉冲保活待机中 (${pulseReason}，约 ${Math.ceil((pulseGapSec - waited) / 60)} 分钟后短暂连接，通道空闲不影响官方App)`;
             await new Promise(r => setTimeout(r, 60000));
             waited += 60;
           }
@@ -2352,7 +2437,7 @@ const server = http.createServer(async (req, res) => {
         keepAlive: true,
         autoSign: true,
         aiChat: true,
-        cloudHang: true,
+        cloudHang: false,
         autoRedeem: false
       },
       redeemConfig: {
@@ -2449,6 +2534,14 @@ const server = http.createServer(async (req, res) => {
     appendLog('System', `已更新账号配置: ${acc.name}`, 'info');
 
     const client = getClient(acc);
+
+    // 如果用户关闭了挂机开关，若当前正处于挂机长连接会话中，立即主动断开并转入脉冲休眠
+    if (body.features && body.features.cloudHang === false) {
+      if (client.endCurrentSession) {
+        client.endCurrentSession('User Disabled Hang Mode');
+      }
+    }
+
     if (acc.enabled && acc.features?.keepAlive === true) {
       if (!client.workerRunning) client.startKeepAliveWorker();
     } else {
