@@ -202,8 +202,9 @@ async function executeNativeSign(client, acc, onLog = console.log) {
 async function executeNativeHang(client, acc, onLog = console.log) {
   onLog('Hang', `正在检查云电脑 WebSocket 长连接保活状态...`, 'info');
   try {
-    if (!client.wsAlive) {
-      onLog('Hang', `正在建立 WebSocket 守护通道 (clinkProxy/MAIN)...`, 'info');
+    // 确保后台长连接守护进程正在运行
+    if (!client.workerRunning && acc.features?.keepAlive !== false && !acc.manualShutdown) {
+      onLog('Hang', `正在启动云电脑长连接守护进程...`, 'info');
       client.startKeepAliveWorker();
     }
     await client.refreshOfficialTasks();
@@ -215,10 +216,10 @@ async function executeNativeHang(client, acc, onLog = console.log) {
 
     if (curSec >= totSec || (hangTask && hangTask.status === 2)) {
       onLog('Hang', `✅ 今日云电脑使用时长已达标 (${totMin}分钟)，已斩获 100 积分奖励！`, 'success');
-      return { success: true, message: `今日云电脑使用时长已满 ${totMin} 分钟，已斩获 100 积分！` };
+      return { success: true, isCompleted: true, message: `今日云电脑使用时长已满 ${totMin} 分钟，已斩获 100 积分！` };
     } else {
       onLog('Hang', `⚡ 当前挂机进度: ${curMin}/${totMin} 分钟 (${curSec}/${totSec}秒)。长连接正稳定运行累加中。`, 'info');
-      return { success: true, message: `当前挂机进度: ${curMin}/${totMin} 分钟，持续累加中` };
+      return { success: true, isCompleted: false, message: `当前挂机进度: ${curMin}/${totMin} 分钟，持续累加中` };
     }
   } catch (e) {
     onLog('Hang', `挂机守护异常: ${e.message}`, 'error');

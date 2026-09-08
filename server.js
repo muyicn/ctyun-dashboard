@@ -510,17 +510,19 @@ class CtYunClient {
     this.externalYieldUntil = 0; // 官方客户端抢占避让截止时间戳
   }
 
-  // 检测今日挂机 1 小时任务是否已达成
+  // 检测今日挂机 1 小时任务是否已达成 (严格依据今日真实达成状态)
   isTodayHangTaskCompleted() {
     const todayStr = getBeijingDateOnly();
-    // 1. 本地记录判定
-    if (this.account.stats?.lastHangTime && this.account.stats.lastHangTime.startsWith(todayStr)) {
-      return true;
-    }
-    // 2. 官方任务中心进度判定
+    // 1. 优先依据官方任务中心最新进度
     if (this.metrics.officialTasks && this.metrics.officialTasks.length > 0) {
       const hangTask = this.metrics.officialTasks.find(t => t.name.includes('使用1小时'));
-      if (hangTask && (hangTask.status === 2 || (hangTask.total > 0 && hangTask.current >= hangTask.total))) {
+      if (hangTask) {
+        return hangTask.status === 2 || (hangTask.total > 0 && hangTask.current >= hangTask.total);
+      }
+    }
+    // 2. 本地记录判定：必须是今日时间戳且达到 60 分钟
+    if (this.account.stats?.lastHangTime && this.account.stats.lastHangTime.startsWith(todayStr)) {
+      if ((this.account.stats.hangMinutesToday || 0) >= 60) {
         return true;
       }
     }
@@ -1093,17 +1095,24 @@ class CtYunClient {
 
         await new Promise((resolveSession) => {
           let cycleDone = false;
+          let isClosingSelf = false;
           let sessionTimeout = null;
+          let hangCheckInterval = null;
 
           const endSession = (reason) => {
             if (cycleDone) return;
             cycleDone = true;
+            isClosingSelf = true;
             this.endCurrentSession = null;
             if (sessionTimeout) clearTimeout(sessionTimeout);
             if (this.countdownTimer) clearInterval(this.countdownTimer);
             if (this.clinkPingTimer) {
               clearInterval(this.clinkPingTimer);
               this.clinkPingTimer = null;
+            }
+            if (hangCheckInterval) {
+              clearInterval(hangCheckInterval);
+              hangCheckInterval = null;
             }
             if (this.ws) {
               try { this.ws.close(); } catch (e) {}
@@ -1314,21 +1323,42 @@ class CtYunClient {
                     }
                   }, 5000);
 
-                  // 刷新官方任务与积分进度；若已达标 1 小时，立即优雅让位断开
-                  setTimeout(async () => {
-                    await this.refreshOfficialTasks();
-                    if (this.isTodayHangTaskCompleted()) {
-                      appendLog('KeepAlive', `[${accName}] 🎉 今日使用 AI 云电脑 1 小时任务已圆满达成，后台长连接立即主动让位关闭，释放通道给官方 APP！`, 'success');
-                      endSession('Today Hang Goal Achieved');
-                    }
-                  }, 2500);
+                  // 挂机模式下：持续连接累加秒数，每 20 秒巡检一次进度，真正达到 3600 秒 (1小时) 后立即让位
+                  if (!todayHangDone) {
+                    const checkHangProgress = async () => {
+                      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+                      await this.refreshOfficialTasks();
+                      const hangTask = this.metrics.officialTasks?.find(t => t.name.includes('使用1小时'));
+                      const curSec = hangTask ? (hangTask.current || 0) : 0;
+                      const totSec = hangTask ? (hangTask.total || 3600) : 3600;
+
+                      if (curSec >= totSec || (hangTask && hangTask.status === 2)) {
+                        if (hangCheckInterval) clearInterval(hangCheckInterval);
+                        appendLog('KeepAlive', `[${accName}] 🎉 恭喜！今日使用 AI 云电脑 1 小时挂机任务已圆满达成 (+100积分)！后台长连接立即主动让位关闭，转入脉冲保活防休眠模式。`, 'success');
+                        sendNotification(
+                          appConfig.settings,
+                          `🎉 挂机1小时任务达成 - ${accName}`,
+                          `账号【${accName}】今日使用 AI 云电脑达到 1 小时任务已完成，100 积分已入账！`
+                        );
+                        endSession('Today Hang Goal Achieved');
+                      } else {
+                        const curMin = Math.floor(curSec / 60);
+                        const totMin = Math.floor(totSec / 60);
+                        this.metrics.lastHeartbeatResult = `挂机累加中: 已在线 ${curMin}/${totMin} 分钟 (${curSec}/${totSec}秒)`;
+                      }
+                    };
+
+                    // 连接后 2.5 秒检查一次，随后每 20 秒持续巡检
+                    setTimeout(checkHangProgress, 2500);
+                    hangCheckInterval = setInterval(checkHangProgress, 20000);
+                  }
                 }
 
                 // 核心协议检测：收到服务端 Type 119 (CLINK_MSG_MAIN_CLIENT_OFFLINE) 或强制下线信号
                 // 代表官方手机 App / PC 端正在登录或发生抢占，后台长连接光速让位
                 if (type === 119 || type === 120 || type === 137) {
                   appendLog('KeepAlive', `[${accName}] 收到云电脑客户端状态通知 (${type})，主动避让官方客户端...`, 'info');
-                  this.yieldToExternalClient(20);
+                  this.yieldToExternalClient(2);
                   return;
                 }
               }
@@ -1345,10 +1375,10 @@ class CtYunClient {
 
           this.ws.on('close', (code, reason) => {
             const reasonStr = String(reason || '');
-            // 收到 1000/1001/4000 等异常断开或被踢提示，判断是否为外部客户端抢占
-            if (code === 1000 || code === 1001 || code === 4001 || reasonStr.includes('preempt') || reasonStr.includes('conflict')) {
-              appendLog('KeepAlive', `[${accName}] 检测到外部设备正在登入云电脑 (状态码: ${code})，后台主动让位 20 分钟！`, 'info');
-              this.yieldToExternalClient(20);
+            // 只有当非自主关闭且收到抢占/被踢状态码时，才认定为外部客户端抢占并让位
+            if (!isClosingSelf && (code === 4001 || reasonStr.includes('preempt') || reasonStr.includes('conflict') || reasonStr.includes('kick'))) {
+              appendLog('KeepAlive', `[${accName}] 检测到外部设备正在登入云电脑 (状态码: ${code})，后台主动让位 2 分钟！`, 'info');
+              this.yieldToExternalClient(2);
             } else {
               appendLog('Heartbeat', `[${accName}] 保活长连接正常关闭 (${code} - ${reason || '正常轮转'})`, 'info');
             }
@@ -1361,7 +1391,7 @@ class CtYunClient {
         // 脉冲间隔待机：任务已达标时，连接结束后长时间空闲
         // 按用户设定的"脉冲保活间隔 (分钟)"进行短暂真实连接，重置天翼云"断开1小时自动休眠"计时器
         // 期间若检测到浏览器/官方客户端占用，脉冲计时立即暂停并在其释放后从零重新计算！
-        if (todayHangDone) {
+        if (this.isTodayHangTaskCompleted()) {
           const pulseGapSec = Math.min(55, Math.max(5, parseInt(appConfig.settings?.pulseIntervalMinutes) || 45)) * 60;
           let waited = 0;
           while (waited < pulseGapSec && this.workerRunning) {
@@ -1391,6 +1421,7 @@ class CtYunClient {
             waited += 60;
           }
         } else {
+          // 挂机模式下：短休 2 秒后立即进入下一轮连接，确保持续不间断挂机累加时长直至满 3600 秒达成！
           await new Promise(r => setTimeout(r, 2000));
         }
 
@@ -3378,6 +3409,7 @@ const server = http.createServer(async (req, res) => {
     // 管理员导入时若带 settings 则一并更新
     if (session.role === 'admin' && body.settings && typeof body.settings === 'object') {
       appConfig.settings = { ...appConfig.settings, ...body.settings };
+      appendLog('System', `⚠️ 备份文件包含系统设置，已一并还原 (保活周期: ${appConfig.settings.keepAliveSeconds}s / 脉冲间隔: ${appConfig.settings.pulseIntervalMinutes || 45}分钟 / 触发时间: ${appConfig.settings.cron?.executeTime || '01:20'})。如与预期不符，请前往「系统设置」核对调整。`, 'warning');
     }
 
     saveConfig(appConfig);

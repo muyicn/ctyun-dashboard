@@ -112,6 +112,9 @@ class TaskScheduler {
       if (!acc.enabled) continue;
       const f = acc.features || {};
       const client = this.getClient(acc);
+      try {
+        await client.refreshOfficialTasks();
+      } catch (e) {}
       const tasks = client?.metrics?.officialTasks || [];
 
       // 仅考核用户自身开启的功能项是否达成
@@ -378,9 +381,8 @@ class TaskScheduler {
         // 4. 原生云电脑挂机守护检测
         if (acc.features?.cloudHang !== false) {
           try {
-            await executeNativeHang(client, acc, (src, msg, lvl) => this.appendLog(src, `[${acc.name}] ${msg}`, lvl));
-            acc.stats.lastHangTime = getBeijingTimeString();
-            accSummary.hang = true;
+            const hangRes = await executeNativeHang(client, acc, (src, msg, lvl) => this.appendLog(src, `[${acc.name}] ${msg}`, lvl));
+            accSummary.hang = (hangRes && hangRes.isCompleted === true);
           } catch (e) {
             this.appendLog('Hang', `[${acc.name}] 挂机状态检测异常: ${e.message}`, 'error');
           }
@@ -404,10 +406,34 @@ class TaskScheduler {
       await new Promise(r => setTimeout(r, 1000));
     }
 
-    this.lastCompletedDate = todayStr;
-    if (this.saveConfig) this.saveConfig();
+    // 严格判定：只有当所有账号已开启的全部任务（包括挂机满 1 小时）都真正达成时，才标记今日流程圆满完成
+    let allAccountsFullyDone = true;
+    for (const acc of accounts) {
+      const client = this.getClient(acc);
+      const tasks = client?.metrics?.officialTasks || [];
+      const loginTask = tasks.find(t => t.name.includes('登录AI云电脑'));
+      const aiTask = tasks.find(t => t.name.includes('AI对话'));
+      const hangTask = tasks.find(t => t.name.includes('使用1小时'));
 
-    this.appendLog('Scheduler', `🎉 今日云电脑定时任务流程已全部顺利执行完成！做完即标记今日达成，当天绝不再空转。`, 'success');
+      if (acc.features?.autoSign !== false && !(loginTask && (loginTask.status === 2 || loginTask.current >= loginTask.total))) {
+        allAccountsFullyDone = false;
+      }
+      if (acc.features?.aiChat !== false && !(aiTask && (aiTask.status === 2 || aiTask.current >= aiTask.total))) {
+        allAccountsFullyDone = false;
+      }
+      if (acc.features?.cloudHang !== false && !(hangTask && (hangTask.status === 2 || hangTask.current >= hangTask.total))) {
+        allAccountsFullyDone = false;
+      }
+    }
+
+    if (allAccountsFullyDone) {
+      this.lastCompletedDate = todayStr;
+      this.appendLog('Scheduler', `🎉 今日云电脑定时任务流程已全部顺利执行完成！做完即标记今日达成，当天绝不再空转。`, 'success');
+    } else {
+      this.appendLog('Scheduler', `⚡ 今日定时自动化流程触发完毕，云电脑长连接正在后台持续挂机累加时长直至满 1 小时达成...`, 'info');
+    }
+
+    if (this.saveConfig) this.saveConfig();
     
     // 发送 Webhook 汇总通知
     const detailText = summaryResults.map(r => `• ${r.name}: 打卡[${r.sign ? 'OK' : '跳过'}], AI对话[${r.aiChat ? 'OK' : '跳过'}], 挂机保活[${r.hang ? 'OK' : '跳过'}]`).join('\n');
