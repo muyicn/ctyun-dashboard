@@ -342,12 +342,22 @@
       </div>
       <div class="modal-body">
         <input type="hidden" id="power-acc-id">
-        <p style="font-size: 13px; color: var(--text-muted);">
+        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 2px;">
           向天翼云下达电源控制指令。执行重启或关机前请确保云电脑内已保存重要数据。
         </p>
-        <div style="background: var(--bg-card); padding: 12px 14px; border-radius: 8px; border: 1px solid var(--border); font-size: 13px;">
-          当前云电脑: <b id="power-desktop-name" style="color: #0f172a;">--</b>
+
+        <div class="form-group" style="margin-top: 4px;">
+          <label style="font-size: 13px; font-weight: 600; color: #334155;">🖥️ 选择操作目标云电脑</label>
+          <select class="form-control" id="power-desktop-select" onchange="onPowerDesktopChange()">
+            <!-- 动态填充名下云电脑列表 -->
+          </select>
         </div>
+
+        <div id="power-status-box" style="background: var(--bg-card); padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); font-size: 13px; display: flex; justify-content: space-between; align-items: center;">
+          <span>当前运行状态:</span>
+          <span id="power-desktop-status" style="font-weight: 700; color: #16a34a;">🟢 运行中</span>
+        </div>
+
         <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 6px;">
           <button class="btn btn-success" onclick="executePowerAction('poweron')">🟢 开机 / 唤醒</button>
           <button class="btn btn-warning" onclick="executePowerAction('reboot')">🔄 重启云电脑</button>

@@ -447,13 +447,65 @@ header {
   font-weight: 700;
 }
 
-.account-name-block h3 {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text-main);
+.account-name-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.account-name-row {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.account-name-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-main);
+  cursor: pointer;
+  padding: 2px 6px;
+  margin: -2px -6px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed transparent;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.account-name-text:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #2563eb;
+}
+
+.account-name-text:hover .name-edit-icon {
+  opacity: 0.85;
+}
+
+.name-edit-icon {
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  color: #64748b;
+}
+
+.inline-name-input {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main);
+  padding: 3px 8px;
+  border: 1.5px solid #2563eb;
+  border-radius: var(--radius-sm);
+  background: #ffffff;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+  width: 140px;
+  height: 28px;
+  box-sizing: border-box;
 }
 
 .account-phone {

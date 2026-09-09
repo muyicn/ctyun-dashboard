@@ -277,6 +277,8 @@ function openPointsDetailModal() {
 }
 
 // 2. 加载多账号列表
+let activeEditingAccId = null;
+
 async function loadAccounts(isSilent = false) {
   try {
     const res = await authFetch("/api/accounts");
@@ -386,12 +388,12 @@ function renderAccounts() {
 
     // 云电脑设备列表渲染 (支持单账号多台云电脑展示)
     let desktopsHtml = '';
-    const dList = (acc.desktops && acc.desktops.length > 0) ? acc.desktops : (m.desktopName ? [{
-      desktopId: m.desktopId || acc.stats?.desktopId || '0',
-      desktopName: m.desktopName,
-      useStatusText: '运行中',
+    const dList = (acc.desktops && acc.desktops.length > 0) ? acc.desktops : [{
+      desktopId: m.desktopId || acc.stats?.desktopId || '',
+      desktopName: m.desktopName || '天翼云电脑',
+      useStatusText: (acc.stats?.keepAliveStatus === 'online' || m.status === 'online') ? '运行中' : '就绪',
       flavorName: ''
-    }] : []);
+    }];
 
     if (dList.length > 0) {
       desktopsHtml = `
@@ -402,17 +404,17 @@ function renderAccounts() {
           </div>
           <div style="display: flex; flex-direction: column; gap: 6px;">
             ${dList.map(d => `
-              <div style="display: flex; justify-content: space-between; align-items: center; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px 10px; font-size: 12px;">
-                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
-                  <span style="color: #0f172a; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${escapeHtml(d.desktopName || '云电脑')}</span>
-                  ${d.flavorName ? `<span style="font-size: 10px; background: #eff6ff; color: #2563eb; padding: 1px 6px; border-radius: 4px;">${escapeHtml(d.flavorName)}</span>` : ''}
+              <div style="display: flex; justify-content: space-between; align-items: center; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px 10px; font-size: 12px; gap: 8px;">
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; overflow: hidden;">
+                  <span title="${escapeHtml(d.desktopName || '云电脑')}" style="color: #0f172a; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; flex-shrink: 1; cursor: help;">${escapeHtml(d.desktopName || '云电脑')}</span>
+                  ${d.flavorName ? `<span style="font-size: 10.5px; background: #eff6ff; color: #2563eb; padding: 1px 6px; border-radius: 4px; flex-shrink: 0; white-space: nowrap;">${escapeHtml(d.flavorName)}</span>` : ''}
                 </div>
-                <div style="display: flex; align-items: center; gap: 6px; shrink: 0;">
-                  <span style="color: ${(d.useStatusText || '').includes('运行') ? '#16a34a' : '#64748b'}; font-weight: 600;">
+                <div style="display: flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap;">
+                  <span style="color: ${(d.useStatusText || '').includes('运行') ? '#16a34a' : '#64748b'}; font-weight: 600; flex-shrink: 0; white-space: nowrap; font-size: 11.5px;">
                     ${(d.useStatusText || '').includes('运行') ? '🟢 ' : '⚪ '}${d.useStatusText || '运行中'}
                   </span>
-                  <button class="btn btn-sm" style="padding: 2px 8px; font-size: 11px;" onclick="openPowerModal('${acc.id}', '${d.desktopId}', '${escapeHtml(d.desktopName)}')">⚡ 电源</button>
-                  <button class="btn btn-sm btn-primary" style="padding: 2px 8px; font-size: 11px;" onclick="launchWebDesktop('${acc.id}', '${d.desktopId}')">🚀 打开</button>
+                  <button class="btn btn-sm" style="padding: 2px 7px; font-size: 11px; flex-shrink: 0; white-space: nowrap;" onclick="openPowerModal('${acc.id}', '${d.desktopId}', '${escapeHtml(d.desktopName)}')">⚡ 电源</button>
+                  <button class="btn btn-sm btn-primary" style="padding: 2px 7px; font-size: 11px; flex-shrink: 0; white-space: nowrap;" onclick="launchWebDesktop('${acc.id}', '${d.desktopId}')">🚀 打开</button>
                 </div>
               </div>
             `).join('')}
@@ -421,22 +423,28 @@ function renderAccounts() {
       `;
     }
 
+    const displayName = acc.name || acc.user;
+    const isEditingThis = (activeEditingAccId === acc.id);
+
     card.innerHTML = `
       <div class="card-top">
         <div class="account-main-info">
-          <div class="account-avatar">${(acc.name || acc.user)[0].toUpperCase()}</div>
+          <div class="account-avatar" id="acc-avatar-${acc.id}">${(displayName)[0].toUpperCase()}</div>
           <div class="account-name-block">
-            <h3>
-              ${escapeHtml(acc.name || acc.user)}
-              ${statusBadge}
-            </h3>
+            <div class="account-name-row">
+              <span class="account-name-text ${isEditingThis ? 'hidden' : ''}" id="acc-name-text-${acc.id}" onclick="startInlineEditName('${acc.id}')" title="点击直接修改账号备注">
+                <span class="name-label" id="acc-name-val-${acc.id}">${escapeHtml(displayName)}</span>
+                <span class="name-edit-icon" title="点击直接修改备注">✏️</span>
+              </span>
+              <input type="text" class="inline-name-input ${isEditingThis ? '' : 'hidden'}" id="acc-name-input-${acc.id}" value="${escapeHtml(displayName)}" onkeydown="handleInlineNameKey(event, '${acc.id}')" onblur="saveInlineName('${acc.id}')" maxlength="30" placeholder="账号备注名">
+            </div>
             <div class="account-phone">
               📱 ${maskPhone} &nbsp; ${sessionBadge || boundBadge}
             </div>
           </div>
         </div>
         <div style="display: flex; gap: 4px;">
-          <button class="btn btn-sm" onclick="editAccount('${acc.id}')" title="编辑账号">✏️</button>
+          <button class="btn btn-sm" onclick="editAccount('${acc.id}')" title="编辑账号与重新验证">✏️</button>
           <button class="btn btn-sm btn-danger" onclick="deleteAccount('${acc.id}')" title="删除账号">🗑️</button>
         </div>
       </div>
@@ -459,9 +467,15 @@ function renderAccounts() {
           <span style="color: #2563eb; font-weight: 700;">📡 状态与心跳监视</span>
           <span style="color: var(--text-muted);">周期: <b>${m.keepAliveSeconds || 60}s</b> (倒计时: <b style="color: #16a34a;">${m.cycleCountdown || 60}s</b>)</span>
         </div>
-        <div style="color: #475569; line-height: 1.7;">
-          <div>目标设备: <span style="color: #0f172a; font-weight: 600;">${escapeHtml(m.desktopName || '云电脑')} (${m.currentHost || '未连接'})</span></div>
-          <div>当前动作: <span style="color: ${(m.lastHeartbeatResult || '').includes('避让') ? '#d97706' : '#16a34a'}; font-weight: 600;">${escapeHtml(m.lastHeartbeatResult || '正在建立心跳通道...')}</span></div>
+        <div style="color: #475569; line-height: 1.8;">
+          <div style="display: flex; align-items: baseline; gap: 4px; overflow: hidden; white-space: nowrap;">
+            <span style="flex-shrink: 0;">目标设备:</span>
+            <span title="${escapeHtml(m.desktopName || '云电脑')} (${escapeHtml(m.currentHost || '未连接')})" style="color: #0f172a; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; flex: 1; cursor: help;">${escapeHtml(m.desktopName || '云电脑')} (${escapeHtml(m.currentHost || '未连接')})</span>
+          </div>
+          <div style="display: flex; align-items: baseline; gap: 4px; overflow: hidden; white-space: nowrap;">
+            <span style="flex-shrink: 0;">当前动作:</span>
+            <span title="${escapeHtml(m.lastHeartbeatResult || '正在建立心跳通道...')}" style="color: ${(m.lastHeartbeatResult || '').includes('避让') ? '#d97706' : '#16a34a'}; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; flex: 1; cursor: help;">${escapeHtml(m.lastHeartbeatResult || '正在建立心跳通道...')}</span>
+          </div>
           <div>成功轮次: <span style="color: #2563eb; font-weight: 600;">${m.successCount || 0} 轮</span></div>
         </div>
       </div>
@@ -511,7 +525,7 @@ function renderAccounts() {
         </div>
       </div>
 
-      <!-- 快捷操作按钮 (现代化零冗余规范) -->
+      <!-- 快捷操作按钮 -->
       <div class="card-actions">
         ${acc.sessionExpired ? `
           <button class="btn btn-danger btn-launch-full" onclick="editAccount('${acc.id}')" style="margin-bottom:6px;">
@@ -519,10 +533,6 @@ function renderAccounts() {
             <span class="btn-subtext">输验证码恢复 ➔</span>
           </button>
         ` : ''}
-        <button class="btn btn-launch-full" onclick="launchWebDesktop('${acc.id}')" title="直接在独立弹窗中免密直通云电脑远程桌面">
-          <span>🚀 访问云电脑</span>
-          <span class="btn-subtext">免密直通桌面 ➔</span>
-        </button>
         <div class="card-action-tools">
           <button class="btn btn-tool" onclick="syncAccountTasks('${acc.id}')" title="一键极速执行今日全部任务 (打卡/AI对话/挂机)">🔄 一键同步任务</button>
           <button class="btn btn-tool" onclick="openPowerModal('${acc.id}')" title="云电脑电源管理 (开机/重启/关机)">⚡ 电源管理</button>
@@ -534,6 +544,95 @@ function renderAccounts() {
 
     container.appendChild(card);
   });
+}
+
+// 账号备注名即点即改 (Inline Edit)
+function startInlineEditName(accId) {
+  activeEditingAccId = accId;
+  const textEl = document.getElementById(`acc-name-text-${accId}`);
+  const inputEl = document.getElementById(`acc-name-input-${accId}`);
+  if (!textEl || !inputEl) return;
+  textEl.classList.add("hidden");
+  inputEl.classList.remove("hidden");
+  inputEl.focus();
+  inputEl.select();
+}
+
+function handleInlineNameKey(e, accId) {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    const inputEl = document.getElementById(`acc-name-input-${accId}`);
+    if (inputEl) inputEl.blur();
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    activeEditingAccId = null;
+    const acc = accounts.find(a => a.id === accId);
+    const textEl = document.getElementById(`acc-name-text-${accId}`);
+    const inputEl = document.getElementById(`acc-name-input-${accId}`);
+    if (inputEl && textEl) {
+      inputEl.value = acc ? (acc.name || acc.user) : inputEl.value;
+      inputEl.classList.add("hidden");
+      textEl.classList.remove("hidden");
+    }
+  }
+}
+
+async function saveInlineName(accId) {
+  const acc = accounts.find(a => a.id === accId);
+  const textEl = document.getElementById(`acc-name-text-${accId}`);
+  const inputEl = document.getElementById(`acc-name-input-${accId}`);
+  const labelEl = document.getElementById(`acc-name-val-${accId}`);
+  if (!acc || !inputEl || !textEl) {
+    activeEditingAccId = null;
+    return;
+  }
+
+  const newName = inputEl.value.trim();
+  const oldName = acc.name || acc.user;
+  activeEditingAccId = null;
+
+  // 切回展示态
+  inputEl.classList.add("hidden");
+  textEl.classList.remove("hidden");
+
+  // 如果内容没变或为空则还原
+  if (!newName || newName === oldName) {
+    inputEl.value = oldName;
+    return;
+  }
+
+  // 响应式即时渲染 (Optimistic UI)
+  const previousName = acc.name;
+  acc.name = newName;
+  if (labelEl) labelEl.textContent = newName;
+
+  // 响应式更新头像字母
+  const avatarEl = document.getElementById(`acc-avatar-${accId}`);
+  if (avatarEl) avatarEl.textContent = (newName || acc.user)[0].toUpperCase();
+
+  try {
+    const res = await authFetch(`/api/accounts/${accId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: newName })
+    });
+    if (res.ok) {
+      showToast(`账号备注已成功修改为 "${newName}"`, "success");
+    } else {
+      const err = await res.json();
+      showToast("修改失败: " + (err.error || "未知错误"), "error");
+      acc.name = previousName;
+      if (labelEl) labelEl.textContent = previousName || acc.user;
+      inputEl.value = previousName || acc.user;
+      if (avatarEl) avatarEl.textContent = (previousName || acc.user)[0].toUpperCase();
+    }
+  } catch (e) {
+    showToast("网络请求异常: " + e.message, "error");
+    acc.name = previousName;
+    if (labelEl) labelEl.textContent = previousName || acc.user;
+    inputEl.value = previousName || acc.user;
+    if (avatarEl) avatarEl.textContent = (previousName || acc.user)[0].toUpperCase();
+  }
 }
 
 // 快速切换开关
@@ -1221,15 +1320,86 @@ async function submitManualRedeemOrder() {
 // 云电脑电源管理 (开机 / 重启 / 关机)
 // ==========================================
 let currentPowerDesktopId = '';
+let currentPowerAccountDesktops = [];
 
-function openPowerModal(accId, desktopId = '', desktopName = '') {
+async function openPowerModal(accId, desktopId = '', desktopName = '') {
   const acc = accounts.find(a => a.id === accId);
   if (!acc) return;
   document.getElementById("power-acc-id").value = acc.id;
   currentPowerDesktopId = desktopId || '';
-  const dName = desktopName || acc.liveMetrics?.desktopName || acc.name;
-  document.getElementById("power-desktop-name").innerText = `${dName} (${acc.liveMetrics?.currentHost || '云电脑'})`;
+
+  const select = document.getElementById("power-desktop-select");
+  select.innerHTML = "<option value=''>正在获取名下云电脑...</option>";
+  document.getElementById("power-desktop-status").innerHTML = `<span style="color: #64748b;">检测中...</span>`;
   openModal("power-modal");
+
+  // 1. 先用本地已有的 desktops 缓存极速渲染
+  const localList = (acc.desktops && acc.desktops.length > 0) ? acc.desktops : (acc.liveMetrics?.desktopName ? [{
+    desktopId: acc.liveMetrics?.desktopId || acc.stats?.desktopId || '0',
+    desktopName: acc.liveMetrics?.desktopName,
+    useStatusText: '运行中',
+    flavorName: ''
+  }] : []);
+
+  renderPowerDesktopSelect(localList, desktopId);
+
+  // 2. 异步向后端拉取实时名下全部云电脑设备与状态
+  try {
+    const res = await authFetch(`/api/accounts/${accId}/desktops`);
+    if (res.ok) {
+      const list = await res.json();
+      if (list && list.length > 0) {
+        currentPowerAccountDesktops = list;
+        renderPowerDesktopSelect(list, desktopId || currentPowerDesktopId);
+      }
+    }
+  } catch (e) {}
+}
+
+function renderPowerDesktopSelect(list, targetDesktopId) {
+  const select = document.getElementById("power-desktop-select");
+  if (!select) return;
+  if (!list || list.length === 0) {
+    select.innerHTML = "<option value=''>默认主云电脑</option>";
+    onPowerDesktopChange();
+    return;
+  }
+
+  currentPowerAccountDesktops = list;
+  select.innerHTML = "";
+  list.forEach((d, idx) => {
+    const opt = document.createElement("option");
+    opt.value = d.desktopId;
+    opt.dataset.status = d.useStatusText || '运行中';
+    const flavor = d.flavorName ? ` [${d.flavorName}]` : '';
+    opt.innerText = `🖥️ ${d.desktopName || '云电脑'}${flavor} - (${d.useStatusText || '运行中'})`;
+    
+    // 如果指定了 targetDesktopId，或者首项匹配
+    if (targetDesktopId && String(targetDesktopId) === String(d.desktopId)) {
+      opt.selected = true;
+    } else if (!targetDesktopId && idx === 0) {
+      opt.selected = true;
+    }
+    select.appendChild(opt);
+  });
+
+  onPowerDesktopChange();
+}
+
+function onPowerDesktopChange() {
+  const select = document.getElementById("power-desktop-select");
+  const statusEl = document.getElementById("power-desktop-status");
+  if (!select || !statusEl) return;
+
+  currentPowerDesktopId = select.value || '';
+  const selectedOpt = select.options[select.selectedIndex];
+  if (selectedOpt && selectedOpt.dataset.status) {
+    const st = selectedOpt.dataset.status;
+    const isRunning = st.includes('运行');
+    statusEl.innerHTML = `<span style="color: ${isRunning ? '#16a34a' : '#d97706'}; font-weight:700;">${isRunning ? '🟢 ' : '⚪ '}${st}</span>`;
+  } else {
+    statusEl.innerHTML = `<span style="color: #64748b;">就绪</span>`;
+  }
 }
 
 async function executePowerAction(action) {
