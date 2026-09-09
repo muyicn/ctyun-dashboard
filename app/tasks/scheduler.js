@@ -388,12 +388,124 @@ class TaskScheduler {
           }
         }
 
-        // 5. 自动抽奖/商城奖品同步
+        // 5. 自动兑换：策略命中 → 绑定机器下单 → 单笔最多3次重试(间隔3秒)
         if (acc.features?.autoRedeem) {
           try {
-            const list = await client.getRewards();
-            this.appendLog('Redeem', `[${acc.name}] 奖品列表已拉取，当前商城奖品数: ${list.length}`, 'info');
-          } catch (e) {}
+            const rConf = acc.redeemConfig || {};
+            const todayStr = getBeijingDateStr();
+
+            if (rConf.lastRedeemDate !== todayStr && rConf.prodId) {
+              // 策略判定 (每月指定日含月末-1 / 每日 / 间隔天数)
+              const cstDay = parseInt(todayStr.split('-')[2], 10);
+              const ym = todayStr.split('-');
+              const lastDayOfMonth = new Date(Number(ym[0]), Number(ym[1]), 0).getDate();
+              let shouldRedeem = false;
+              let reason = '';
+
+              if (rConf.scheduleType === 'daily') {
+                shouldRedeem = true;
+                reason = '命中每日兑换策略';
+              } else if (rConf.scheduleType === 'interval_days') {
+                if (!rConf.lastRedeemDate) {
+                  shouldRedeem = true;
+                  reason = '首次执行间隔兑换';
+                } else {
+                  const diffDays = Math.floor((new Date(todayStr).getTime() - new Date(rConf.lastRedeemDate).getTime()) / (1000 * 3600 * 24));
+                  if (diffDays >= (parseInt(rConf.intervalDays) || 30)) {
+                    shouldRedeem = true;
+                    reason = `已间隔 ${diffDays} 天，达到设定的 ${rConf.intervalDays} 天`;
+                  }
+                }
+              } else {
+                // monthly_days (默认)：monthlyDays 数组，-1 代表月末最后一天
+                const days = Array.isArray(rConf.monthlyDays) ? rConf.monthlyDays : [-1];
+                if (days.includes(cstDay) || (days.includes(-1) && cstDay === lastDayOfMonth)) {
+                  shouldRedeem = true;
+                  reason = (days.includes(-1) && cstDay === lastDayOfMonth) ? `命中月末最后一天 (${cstDay}号) 兑换策略` : `命中每月 ${cstDay} 号兑换策略`;
+                }
+              }
+
+              if (shouldRedeem) {
+                // 绑定目标机器：优先策略里选定的，其次内存缓存的主云电脑
+                const targetDesktopId = parseInt(rConf.desktopId) || parseInt(client.metrics.desktopId) || parseInt(acc.stats?.desktopId) || 0;
+                if (!targetDesktopId) {
+                  this.appendLog('Redeem', `[${acc.name}] 自动兑换跳过: 名下未找到绑定的云电脑`, 'warning');
+                } else {
+                  const buyTimes = Math.max(1, parseInt(rConf.maxRedeemTimes) || 1);
+                  this.appendLog('Redeem', `[${acc.name}] ${reason}，准备对绑定机器自动下单兑换【${rConf.prodName || rConf.prodId}】x${buyTimes}...`, 'info');
+
+                  let successCount = 0;
+                  let lastMsg = '';
+                  let isRisk = false;
+                  for (let round = 1; round <= buyTimes; round++) {
+                    let orderOk = false;
+                    for (let attempt = 1; attempt <= 3; attempt++) {
+                      try {
+                        if (attempt > 1) {
+                          this.appendLog('Redeem', `[${acc.name}] 第 ${round}/${buyTimes} 件第 ${attempt}/3 次自动重试...`, 'info');
+                          await new Promise(r => setTimeout(r, 3000));
+                        }
+                        // 报文与官方网页前端逐字段一致（pointType 恒1 / 单SKU / bindDesktopId 数字型）
+                        const payload = {
+                          busiChannel: '010',
+                          orderType: 1,
+                          pointType: 1,
+                          points: Number(rConf.costPoints),
+                          sku: [{
+                            execSort: 1,
+                            prodId: Number(rConf.prodId),
+                            prodType: rConf.prodType || 'pointstplupgrade',
+                            attrs: [{ attrKey: 'bindDesktopId', attrVal: targetDesktopId }]
+                          }]
+                        };
+                        const res = await fetch('https://desk.ctyun.cn/selforder/api/selforder/paas/placeOrder', {
+                          method: 'POST',
+                          headers: client.getSignedHeaders({ 'Content-Type': 'application/json;charset=UTF-8' }),
+                          body: JSON.stringify(payload)
+                        });
+                        const data = await res.json();
+                        if (data.code === 0) {
+                          successCount++;
+                          orderOk = true;
+                          this.appendLog('Redeem', `[${acc.name}] ✅ 第 ${successCount}/${buyTimes} 件自动兑换成功，消耗 ${rConf.costPoints} 积分！`, 'success');
+                          break;
+                        }
+                        lastMsg = data.msg || `错误码 ${data.code}`;
+                        this.appendLog('Redeem', `[${acc.name}] 第 ${round}/${buyTimes} 件第 ${attempt} 次自动兑换失败: ${lastMsg}`, 'warning');
+                        if (lastMsg.includes('风控') || lastMsg.includes('频繁') || lastMsg.includes('异常操作')) {
+                          isRisk = true;
+                          break;
+                        }
+                      } catch (e) {
+                        lastMsg = e.message;
+                      }
+                    }
+                    if (!orderOk) break;
+                    if (round < buyTimes) await new Promise(r => setTimeout(r, 3000));
+                  }
+
+                  if (successCount > 0) {
+                    rConf.lastRedeemDate = todayStr;
+                    acc.redeemConfig = rConf;
+                    this.saveConfig();
+                    this.sendNotification(
+                      this.getSettings(),
+                      `🎉 天翼云自动兑换成功 - ${acc.name}`,
+                      `策略: ${reason}\n账号【${acc.name}】成功兑换 ${successCount}/${buyTimes} 件【${rConf.prodName || rConf.prodId}】。`
+                    );
+                  } else if (isRisk) {
+                    this.appendLog('Redeem', `[${acc.name}] 自动兑换触发风控已自动中止: ${lastMsg}`, 'error');
+                  } else {
+                    this.appendLog('Redeem', `[${acc.name}] 自动兑换失败（已重试 3 次）: ${lastMsg}`, 'error');
+                  }
+                }
+              }
+            } else if (rConf.lastRedeemDate === todayStr && rConf.prodId) {
+              this.appendLog('Redeem', `[${acc.name}] 今日自动兑换已完成，跳过重复执行。`, 'info');
+            }
+          } catch (e) {
+            this.appendLog('Redeem', `[${acc.name}] 自动兑换执行异常: ${e.message}`, 'error');
+          }
         }
 
         await client.refreshOfficialTasks();

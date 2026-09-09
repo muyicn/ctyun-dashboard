@@ -16,10 +16,12 @@ async function authFetch(url, options = {}) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  allReceivedLogs = [];
+  const logBox = document.getElementById("log-content");
+  if (logBox) logBox.innerHTML = "";
   checkCurrentUser();
   loadStatus();
   loadAccounts();
-  initLogStream();
   // 5 秒自动轮询一次官方真实任务进度与保活心跳
   setInterval(() => {
     loadAccounts(true);
@@ -106,6 +108,13 @@ async function checkCurrentUser() {
     const res = await authFetch("/api/auth/me");
     const data = await res.json();
 
+    // 动态同步主标题名称
+    if (data.systemTitle) {
+      const titleEl = document.getElementById("main-system-title");
+      if (titleEl) titleEl.innerText = data.systemTitle;
+      document.title = `${data.systemTitle} - 多账号保活控制台`;
+    }
+
     if (data.isLoggedIn && data.user) {
       currentUser = data.user;
       const isAdmin = currentUser.role === "admin";
@@ -122,6 +131,17 @@ async function checkCurrentUser() {
       if (statsGrid) statsGrid.classList.remove("hidden");
       if (sectionHeader) sectionHeader.classList.remove("hidden");
       if (logPanel) logPanel.classList.remove("hidden");
+
+      // 登录状态：显示可点击的蓝色超链接版本号
+      const versionBadge = document.getElementById("footer-version-badge");
+      if (versionBadge) {
+        versionBadge.style.color = "var(--accent)";
+        versionBadge.style.cursor = "pointer";
+        versionBadge.style.textDecoration = "underline";
+        versionBadge.title = "点击查看版本更新说明";
+        versionBadge.onclick = openReleaseNotesModal;
+      }
+
       initLogStream();
     } else {
       currentUser = null;
@@ -136,6 +156,16 @@ async function checkCurrentUser() {
       if (statsGrid) statsGrid.classList.add("hidden");
       if (sectionHeader) sectionHeader.classList.add("hidden");
       if (logPanel) logPanel.classList.add("hidden");
+
+      // 未登录状态：纯灰白普通文本，无下划线，不可点击
+      const versionBadge = document.getElementById("footer-version-badge");
+      if (versionBadge) {
+        versionBadge.style.color = "var(--text-muted)";
+        versionBadge.style.cursor = "default";
+        versionBadge.style.textDecoration = "none";
+        versionBadge.title = "";
+        versionBadge.onclick = null;
+      }
     }
   } catch (e) {
     if (!currentAuthToken) {
@@ -148,9 +178,15 @@ async function checkCurrentUser() {
   }
 }
 
-// Toast 提示
+// Toast 提示 (带自动容错与自愈容器)
 function showToast(message, type = "info") {
-  const container = document.getElementById("toast-container");
+  let container = document.getElementById("toast-container");
+  if (!container) {
+    container = document.createElement("div");
+    container.id = "toast-container";
+    container.className = "toast-container";
+    document.body.appendChild(container);
+  }
   const toast = document.createElement("div");
   toast.className = `toast toast-${type}`;
   toast.innerText = message;
@@ -348,6 +384,43 @@ function renderAccounts() {
       officialTaskHtml = `<div style="font-size: 12px; color: var(--text-muted); text-align: center; padding: 6px 0;">正在同步天翼云官方任务中心数据...</div>`;
     }
 
+    // 云电脑设备列表渲染 (支持单账号多台云电脑展示)
+    let desktopsHtml = '';
+    const dList = (acc.desktops && acc.desktops.length > 0) ? acc.desktops : (m.desktopName ? [{
+      desktopId: m.desktopId || acc.stats?.desktopId || '0',
+      desktopName: m.desktopName,
+      useStatusText: '运行中',
+      flavorName: ''
+    }] : []);
+
+    if (dList.length > 0) {
+      desktopsHtml = `
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;">
+          <div style="font-size: 12px; font-weight: 700; color: #334155; margin-bottom: 6px; display: flex; justify-content: space-between;">
+            <span>🖥️ 名下云电脑 (${dList.length}台)</span>
+            <span style="color: #64748b; font-weight: normal;">多设备独立支持</span>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 6px;">
+            ${dList.map(d => `
+              <div style="display: flex; justify-content: space-between; align-items: center; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px 10px; font-size: 12px;">
+                <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                  <span style="color: #0f172a; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${escapeHtml(d.desktopName || '云电脑')}</span>
+                  ${d.flavorName ? `<span style="font-size: 10px; background: #eff6ff; color: #2563eb; padding: 1px 6px; border-radius: 4px;">${escapeHtml(d.flavorName)}</span>` : ''}
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px; shrink: 0;">
+                  <span style="color: ${(d.useStatusText || '').includes('运行') ? '#16a34a' : '#64748b'}; font-weight: 600;">
+                    ${(d.useStatusText || '').includes('运行') ? '🟢 ' : '⚪ '}${d.useStatusText || '运行中'}
+                  </span>
+                  <button class="btn btn-sm" style="padding: 2px 8px; font-size: 11px;" onclick="openPowerModal('${acc.id}', '${d.desktopId}', '${escapeHtml(d.desktopName)}')">⚡ 电源</button>
+                  <button class="btn btn-sm btn-primary" style="padding: 2px 8px; font-size: 11px;" onclick="launchWebDesktop('${acc.id}', '${d.desktopId}')">🚀 打开</button>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
     card.innerHTML = `
       <div class="card-top">
         <div class="account-main-info">
@@ -377,16 +450,19 @@ function renderAccounts() {
         <button class="btn btn-sm" onclick="copyToClipboard('${devCode}')">复制</button>
       </div>
 
+      <!-- 🖥️ 名下云电脑列表 (支持单账号多机器独立管理) -->
+      ${desktopsHtml}
+
       <!-- 📡 真实 WebSocket 保活心跳状态监视 -->
       <div style="background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; font-size: 12px;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-          <span style="color: #2563eb; font-weight: 700;">📡 长连接保活心跳详情</span>
+          <span style="color: #2563eb; font-weight: 700;">📡 状态与心跳监视</span>
           <span style="color: var(--text-muted);">周期: <b>${m.keepAliveSeconds || 60}s</b> (倒计时: <b style="color: #16a34a;">${m.cycleCountdown || 60}s</b>)</span>
         </div>
         <div style="color: #475569; line-height: 1.7;">
           <div>目标设备: <span style="color: #0f172a; font-weight: 600;">${escapeHtml(m.desktopName || '云电脑')} (${m.currentHost || '未连接'})</span></div>
-          <div>保活动作: <span style="color: #16a34a; font-weight: 600;">${escapeHtml(m.lastHeartbeatResult || '正在建立心跳通道...')}</span></div>
-          <div>成功次数: <span style="color: #2563eb; font-weight: 600;">${m.successCount || 0} 轮次</span></div>
+          <div>当前动作: <span style="color: ${(m.lastHeartbeatResult || '').includes('避让') ? '#d97706' : '#16a34a'}; font-weight: 600;">${escapeHtml(m.lastHeartbeatResult || '正在建立心跳通道...')}</span></div>
+          <div>成功轮次: <span style="color: #2563eb; font-weight: 600;">${m.successCount || 0} 轮</span></div>
         </div>
       </div>
 
@@ -402,7 +478,7 @@ function renderAccounts() {
       <!-- 功能开关 -->
       <div class="features-box">
         <div class="feature-row">
-          <span>📡 启用云电脑保活 (${m.keepAliveSeconds || 60}s周期长连接守护)</span>
+          <span>📡 启用云电脑保活 (${m.keepAliveSeconds || 60}s周期守护/${acc.pulseIntervalSeconds || 30}s旁观脉冲)</span>
           <label class="switch">
             <input type="checkbox" ${f.keepAlive !== false ? 'checked' : ''} onchange="toggleFeature('${acc.id}', 'keepAlive', this.checked)">
             <span class="slider"></span>
@@ -519,6 +595,93 @@ async function refreshModalCaptcha() {
   }
 }
 
+let qrPollingTimer = null;
+let currentQrCodeId = '';
+
+function switchAccountLoginTab(tab) {
+  const btnQr = document.getElementById("tab-btn-qrcode");
+  const btnPwd = document.getElementById("tab-btn-pwd");
+  const panelQr = document.getElementById("login-panel-qrcode");
+  const panelPwd = document.getElementById("login-panel-pwd");
+  const btnSave = document.getElementById("btn-save-account-pwd");
+
+  if (tab === 'qrcode') {
+    if (btnQr) { btnQr.className = "btn btn-sm btn-primary"; }
+    if (btnPwd) { btnPwd.className = "btn btn-sm"; }
+    if (panelQr) panelQr.classList.remove("hidden");
+    if (panelPwd) panelPwd.classList.add("hidden");
+    if (btnSave) btnSave.style.display = "none";
+    loadQrCodeForModal();
+  } else {
+    if (btnQr) { btnQr.className = "btn btn-sm"; }
+    if (btnPwd) { btnPwd.className = "btn btn-sm btn-primary"; }
+    if (panelQr) panelQr.classList.add("hidden");
+    if (panelPwd) panelPwd.classList.remove("hidden");
+    if (btnSave) btnSave.style.display = "inline-block";
+    if (qrPollingTimer) { clearInterval(qrPollingTimer); qrPollingTimer = null; }
+    setTimeout(refreshModalCaptcha, 200);
+  }
+}
+
+async function loadQrCodeForModal() {
+  if (qrPollingTimer) { clearInterval(qrPollingTimer); qrPollingTimer = null; }
+  const imgEl = document.getElementById("acc-qrcode-img");
+  const loadingEl = document.getElementById("acc-qrcode-loading");
+  const hintEl = document.getElementById("acc-qrcode-hint");
+
+  if (imgEl) imgEl.style.display = "none";
+  if (loadingEl) { loadingEl.style.display = "flex"; loadingEl.innerText = "正在生成官方二维码..."; }
+  if (hintEl) { hintEl.innerText = "等待扫码确认中..."; hintEl.style.color = "#2563eb"; }
+
+  try {
+    const res = await authFetch("/api/account/qrcode/generate", { method: "POST" });
+    const data = await res.json();
+    if (res.ok && data.success && data.qrUrl) {
+      currentQrCodeId = data.qrCodeId;
+      // 使用快速 QR 渲染引擎
+      const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(data.qrUrl)}`;
+      if (imgEl) {
+        imgEl.src = qrApiUrl;
+        imgEl.onload = () => {
+          imgEl.style.display = "block";
+          if (loadingEl) loadingEl.style.display = "none";
+        };
+      }
+
+      // 启动 2 秒轮询看门狗 (携带用户填写的账号备注名，授权成功后直接以此命名)
+      const nameVal = document.getElementById("qrcode-acc-name") ? document.getElementById("qrcode-acc-name").value.trim() : "";
+      qrPollingTimer = setInterval(async () => {
+        try {
+          const sRes = await authFetch(`/api/account/qrcode/status?qrCodeId=${encodeURIComponent(currentQrCodeId)}&deviceCode=${encodeURIComponent(data.deviceCode)}&accountName=${encodeURIComponent(nameVal)}`);
+          const sData = await sRes.json();
+          if (sData.success) {
+            if (sData.codeStatus === 'scaned') {
+              if (hintEl) { hintEl.innerText = "📱 手机端已扫描，请在手机上点击【确认登录】..."; hintEl.style.color = "#16a34a"; }
+            } else if (sData.codeStatus === 'authorize') {
+              if (qrPollingTimer) { clearInterval(qrPollingTimer); qrPollingTimer = null; }
+              showToast("🎉 官方扫码授权成功！云电脑已上线！", "success");
+              closeModal("account-modal");
+              loadAccounts();
+            } else if (sData.codeStatus === 'expire') {
+              if (qrPollingTimer) { clearInterval(qrPollingTimer); qrPollingTimer = null; }
+              if (hintEl) { hintEl.innerText = "⚠️ 二维码已失效，点击刷新重试"; hintEl.style.color = "#ef4444"; }
+              if (imgEl) imgEl.style.display = "none";
+              if (loadingEl) {
+                loadingEl.style.display = "flex";
+                loadingEl.innerHTML = `<button class="btn btn-sm btn-primary" onclick="loadQrCodeForModal()">🔄 刷新二维码</button>`;
+              }
+            }
+          }
+        } catch (e) {}
+      }, 2000);
+    } else {
+      if (loadingEl) loadingEl.innerText = "获取二维码失败: " + (data.error || '接口异常');
+    }
+  } catch (e) {
+    if (loadingEl) loadingEl.innerText = "网络异常，点击重试";
+  }
+}
+
 function openAddAccountModal() {
   document.getElementById("modal-account-title").innerText = "添加天翼云账号";
   document.getElementById("acc-id").value = "";
@@ -527,8 +690,12 @@ function openAddAccountModal() {
   document.getElementById("acc-password").value = "";
   document.getElementById("acc-captcha-code").value = "";
   document.getElementById("acc-device-code").value = "";
+  const qrNameEl = document.getElementById("qrcode-acc-name");
+  if (qrNameEl) qrNameEl.value = "";
+  const tabContainer = document.getElementById("acc-login-tabs");
+  if (tabContainer) tabContainer.style.display = "flex";
   openModal("account-modal");
-  setTimeout(refreshModalCaptcha, 300);
+  switchAccountLoginTab('qrcode');
 }
 
 function editAccount(accId) {
@@ -541,7 +708,10 @@ function editAccount(accId) {
   document.getElementById("acc-password").value = acc.password || "";
   document.getElementById("acc-captcha-code").value = "";
   document.getElementById("acc-device-code").value = acc.deviceCode || "";
+  const tabContainer = document.getElementById("acc-login-tabs");
+  if (tabContainer) tabContainer.style.display = "none";
   openModal("account-modal");
+  switchAccountLoginTab('pwd');
   setTimeout(refreshModalCaptcha, 300);
 }
 
@@ -1016,11 +1186,11 @@ async function submitManualRedeemOrder() {
     const res = await authFetch(`/api/accounts/${accId}/order`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prodId, prodName, prodType, costPoints, desktopId, prodInstId, times })
+      body: JSON.stringify({ prodId, prodName, prodType, costPoints, desktopId, times })
     });
     const data = await res.json();
     if (res.ok && data.success) {
-      showToast(data.message || `🎉 成功兑换 ${prodName} x${times}！`, "success");
+      showToast(data.message || `🎉 成功兑换 ${prodName} x${times}！`, data.partial ? "warning" : "success");
       closeModal("manual-redeem-modal");
       await loadAccounts();
     } else {
@@ -1031,19 +1201,34 @@ async function submitManualRedeemOrder() {
   } catch (e) {
     showToast("请求异常: " + e.message, "error");
   } finally {
-    btn.disabled = false;
-    btn.innerText = "立即确认兑换";
+    // 防风控纪律：兑换后按钮强制 10 秒冷却，杜绝连续点击触发天翼云反欺诈
+    let cooldown = 10;
+    btn.innerText = `冷却中 (${cooldown}s)`;
+    const timer = setInterval(() => {
+      cooldown--;
+      if (cooldown <= 0) {
+        clearInterval(timer);
+        btn.disabled = false;
+        btn.innerText = "立即确认兑换";
+      } else {
+        btn.innerText = `冷却中 (${cooldown}s)`;
+      }
+    }, 1000);
   }
 }
 
 // ==========================================
 // 云电脑电源管理 (开机 / 重启 / 关机)
 // ==========================================
-function openPowerModal(accId) {
+let currentPowerDesktopId = '';
+
+function openPowerModal(accId, desktopId = '', desktopName = '') {
   const acc = accounts.find(a => a.id === accId);
   if (!acc) return;
   document.getElementById("power-acc-id").value = acc.id;
-  document.getElementById("power-desktop-name").innerText = `${acc.liveMetrics?.desktopName || acc.name} (${acc.liveMetrics?.currentHost || '云电脑'})`;
+  currentPowerDesktopId = desktopId || '';
+  const dName = desktopName || acc.liveMetrics?.desktopName || acc.name;
+  document.getElementById("power-desktop-name").innerText = `${dName} (${acc.liveMetrics?.currentHost || '云电脑'})`;
   openModal("power-modal");
 }
 
@@ -1060,7 +1245,8 @@ async function executePowerAction(action) {
 
   showToast(`正在向天翼云下发【${actionName}】指令...`, "info");
   try {
-    const res = await authFetch(`/api/accounts/${accId}/power/${action}`, { method: "POST" });
+    const query = currentPowerDesktopId ? `?desktopId=${encodeURIComponent(currentPowerDesktopId)}` : '';
+    const res = await authFetch(`/api/accounts/${accId}/power/${action}${query}`, { method: "POST" });
     const data = await res.json();
     if (res.ok && data.success) {
       showToast(data.message || `【${actionName}】指令下达成功！`, "success");
@@ -1079,14 +1265,15 @@ async function executePowerAction(action) {
 // ==========================================
 // 弹窗浏览器免密直达访问云电脑 (自动匹配设定的分辨率与缩放)
 // ==========================================
-async function launchWebDesktop(accId) {
+async function launchWebDesktop(accId, targetDesktopId = '') {
   const acc = accounts.find(a => a.id === accId);
   if (!acc) return;
 
   showToast(`正在获取 [${acc.name || acc.user}] 的云电脑直达访问会话...`, "info");
 
   try {
-    const res = await authFetch(`/api/accounts/${accId}/web-launch`);
+    const query = targetDesktopId ? `?desktopId=${encodeURIComponent(targetDesktopId)}` : '';
+    const res = await authFetch(`/api/accounts/${accId}/web-launch${query}`);
     const data = await res.json();
     if (!res.ok || !data.success) {
       showToast(data.error || "获取访问会话失败", "error");
@@ -1102,10 +1289,11 @@ async function launchWebDesktop(accId) {
     
     // 构造直通操作界面 URL (自动免密注入与云电脑操作界面自适应)
     const token = currentAuthToken || localStorage.getItem('ctyun_auth_token') || '';
-    const launchUrl = data.directViewUrl || `/desktop-view?accId=${accId}&token=${encodeURIComponent(token)}`;
+    const directViewParam = targetDesktopId ? `&desktopId=${encodeURIComponent(targetDesktopId)}` : '';
+    const launchUrl = data.directViewUrl || `/desktop-view?accId=${accId}&token=${encodeURIComponent(token)}${directViewParam}`;
 
     // 打开免密直通独立操作窗口
-    const popup = window.open(launchUrl, `ctyun_desktop_${accId}`, windowFeatures);
+    const popup = window.open(launchUrl, `ctyun_desktop_${accId}_${targetDesktopId || 'main'}`, windowFeatures);
 
     if (popup) {
       popup.focus();
@@ -1189,6 +1377,9 @@ async function openSettingsModal() {
     const settings = await res.json();
 
     const c = settings.cron || {};
+    if (document.getElementById("set-system-title")) {
+      document.getElementById("set-system-title").value = settings.systemTitle || "天翼云自动化控制中心";
+    }
     if (document.getElementById("cron-task-time")) {
       document.getElementById("cron-task-time").value = c.executeTime || "01:20";
     }
@@ -1203,8 +1394,8 @@ async function openSettingsModal() {
     toggleSubCronInputs(enableSub);
 
     document.getElementById("set-keepalive-sec").value = settings.keepAliveSeconds || 60;
-    if (document.getElementById("set-pulse-min")) {
-      document.getElementById("set-pulse-min").value = settings.pulseIntervalMinutes || 45;
+    if (document.getElementById("set-pulse-sec")) {
+      document.getElementById("set-pulse-sec").value = settings.pulseIntervalSeconds || (settings.pulseIntervalMinutes ? settings.pulseIntervalMinutes * 60 : 30);
     }
     if (document.getElementById("set-allow-reg")) {
       document.getElementById("set-allow-reg").checked = settings.allowRegistration === true;
@@ -1294,9 +1485,11 @@ function onNotifyChannelChange() {
 }
 
 async function saveSettings() {
+  const customTitle = document.getElementById("set-system-title") ? document.getElementById("set-system-title").value.trim() : "";
   const payload = {
+    systemTitle: customTitle || "天翼云自动化控制中心",
     keepAliveSeconds: parseInt(document.getElementById("set-keepalive-sec").value) || 60,
-    pulseIntervalMinutes: Math.min(55, Math.max(5, parseInt(document.getElementById("set-pulse-min") ? document.getElementById("set-pulse-min").value : 45) || 45)),
+    pulseIntervalSeconds: Math.min(3300, Math.max(10, parseInt(document.getElementById("set-pulse-sec") ? document.getElementById("set-pulse-sec").value : 30) || 30)),
     allowRegistration: document.getElementById("set-allow-reg") ? document.getElementById("set-allow-reg").checked : true,
     defaultQuota: document.getElementById("set-default-quota") ? parseInt(document.getElementById("set-default-quota").value) || 2 : 2,
     cron: {
@@ -1325,6 +1518,11 @@ async function saveSettings() {
     if (res.ok) {
       showToast("系统设置已更新！Webhook 已生效", "success");
       closeModal("settings-modal");
+      if (payload.systemTitle) {
+        const titleEl = document.getElementById("main-system-title");
+        if (titleEl) titleEl.innerText = payload.systemTitle;
+        document.title = `${payload.systemTitle} - 多账号保活控制台`;
+      }
     } else {
       showToast("更新失败", "error");
     }
@@ -1387,23 +1585,12 @@ async function initLogStream() {
     return;
   }
 
-  // 先通过带 Token 的请求主动拉取历史日志
-  try {
-    const res = await authFetch('/api/logs');
-    if (res.ok) {
-      const history = await res.json();
-      if (Array.isArray(history) && history.length > 0) {
-        allReceivedLogs = history;
-        renderFilteredLogs();
-      }
-    }
-  } catch (e) {}
-
   if (eventSource) {
     eventSource.close();
+    eventSource = null;
   }
 
-  // SSE URL 携带 Token，确保服务端安全通过鉴权并精准分发日志
+  // 仅通过单一的 SSE 流实时推送与初始化历史日志，彻底消除“历史请求+初始流”造成的二次重复！
   const sseUrl = `/api/logs/stream?token=${encodeURIComponent(currentAuthToken)}`;
   eventSource = new EventSource(sseUrl);
 
@@ -1519,6 +1706,15 @@ function escapeHtml(str) {
 // ==========================================
 // 配置备份与还原 (JSON 导入/导出)
 // ==========================================
+function openReleaseNotesModal() {
+  if (!currentUser && !currentAuthToken) {
+    showToast("请先登录账号后再查看版本更新介绍！", "warning");
+    openAuthModal();
+    return;
+  }
+  openModal("release-notes-modal");
+}
+
 function openBackupModal() {
   if (!currentAuthToken) {
     showToast("请先登录后再进行配置备份与还原", "error");
@@ -1600,6 +1796,10 @@ function openAuthModal() {
   document.getElementById("auth-password").value = "";
   switchAuthMode("login");
   openModal("auth-modal");
+  setTimeout(() => {
+    const input = document.getElementById("auth-username");
+    if (input) input.focus();
+  }, 100);
 }
 
 function switchAuthMode(mode) {
@@ -1639,9 +1839,39 @@ async function submitAuth() {
       localStorage.setItem("ctyun_auth_token", data.token);
       showToast(authMode === "login" ? `欢迎回来，${data.user.username}！` : `注册成功，欢迎加入！`, "success");
       closeModal("auth-modal");
-      await checkCurrentUser();
-      await loadAccounts();
-      initLogStream();
+      // 立即前端就地置为已登录，彻底消除任何 DOM 刷新等待延迟！
+      currentUser = data.user;
+      const isAdmin = currentUser.role === "admin";
+      const initial = (currentUser.username || "A")[0].toUpperCase();
+      const headerAvatar = document.getElementById("header-avatar");
+      const dropdownUsername = document.getElementById("dropdown-username");
+      const menuAdminUsers = document.getElementById("menu-admin-users");
+      const authBtn = document.getElementById("btn-auth-action");
+      const loggedActionsGroup = document.getElementById("logged-actions-group");
+      const statsGrid = document.getElementById("main-stats-grid");
+      const sectionHeader = document.getElementById("main-section-header");
+      const logPanel = document.getElementById("main-log-panel");
+
+      if (headerAvatar) headerAvatar.innerText = initial;
+      if (dropdownUsername) dropdownUsername.innerText = `${currentUser.username} (${isAdmin ? '管理员' : '普通用户'})`;
+      if (menuAdminUsers) menuAdminUsers.classList.toggle("hidden", !isAdmin);
+      if (authBtn) authBtn.classList.add("hidden");
+      if (loggedActionsGroup) loggedActionsGroup.classList.remove("hidden");
+      if (statsGrid) statsGrid.classList.remove("hidden");
+      if (sectionHeader) sectionHeader.classList.remove("hidden");
+      if (logPanel) logPanel.classList.remove("hidden");
+
+      const versionBadge = document.getElementById("footer-version-badge");
+      if (versionBadge) {
+        versionBadge.style.color = "var(--accent)";
+        versionBadge.style.cursor = "pointer";
+        versionBadge.style.textDecoration = "underline";
+        versionBadge.title = "点击查看版本更新说明";
+        versionBadge.onclick = openReleaseNotesModal;
+      }
+
+      checkCurrentUser();
+      loadAccounts();
     } else {
       showToast(data.error || "操作失败", "error");
     }
@@ -1654,6 +1884,13 @@ function logoutUser() {
   currentAuthToken = "";
   localStorage.removeItem("ctyun_auth_token");
   currentUser = null;
+  if (eventSource) {
+    try { eventSource.close(); } catch (e) {}
+    eventSource = null;
+  }
+  allReceivedLogs = [];
+  const logBox = document.getElementById("log-content");
+  if (logBox) logBox.innerHTML = '<div class="log-line"><span class="log-time">[系统]</span> 未登录状态，日志已隐藏</div>';
   showToast("已安全退出登录", "info");
   checkCurrentUser();
   loadAccounts();

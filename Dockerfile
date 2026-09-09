@@ -23,7 +23,7 @@ FROM node:22-bookworm-slim
 WORKDIR /app
 
 ENV TZ=Asia/Shanghai \
-    PORT=8080 \
+    PORT=8571 \
     CTYUN_DATA_DIR=/app/data
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
@@ -36,7 +36,7 @@ COPY package.json ./
 COPY app ./app
 COPY server.js ./
 
-EXPOSE 8080
+EXPOSE 8571
 
 VOLUME ["/app/data"]
 

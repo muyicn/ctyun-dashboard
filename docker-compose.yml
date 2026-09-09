@@ -7,10 +7,10 @@ services:
     container_name: ctyun-dashboard
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8571:8571"
     environment:
       - TZ=Asia/Shanghai
-      - PORT=8080
+      - PORT=8571
       - CTYUN_DATA_DIR=/app/data
     volumes:
       - ./data:/app/data

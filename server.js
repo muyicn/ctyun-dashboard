@@ -18,7 +18,7 @@ process.on('unhandledRejection', (reason) => {
   console.error('[!] 系统未处理 Promise 拒绝已拦截:', reason?.message || reason);
 });
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8571;
 const DATA_DIR = process.env.CTYUN_DATA_DIR || path.join(__dirname, 'data');
 const STATIC_DIR = path.join(__dirname, 'app', 'static');
 const CONFIG_FILE = path.join(DATA_DIR, 'app_config.json');
@@ -383,7 +383,7 @@ function getDefaultConfig() {
     settings: {
       webPort: PORT,
       keepAliveSeconds: 60,
-      pulseIntervalMinutes: 45,
+      pulseIntervalSeconds: 30,
       allowRegistration: false, // 默认不开放注册，必须由管理员后台手动开启
       defaultQuota: 2,         // 普通用户默认配额 2 台
       cron: {
@@ -410,7 +410,12 @@ function loadConfig() {
     try {
       const content = fs.readFileSync(CONFIG_FILE, 'utf8');
       const cfg = JSON.parse(content);
-      if (!cfg.settings) cfg.settings = getDefaultConfig().settings;
+      const defaultSettings = getDefaultConfig().settings;
+      if (!cfg.settings) {
+        cfg.settings = defaultSettings;
+      } else {
+        cfg.settings = { ...defaultSettings, ...cfg.settings };
+      }
       if (!cfg.accounts) cfg.accounts = [];
       if (!cfg.users) cfg.users = [];
       // 默认已有账号归属 admin，并解密密码还原至内存
@@ -529,11 +534,13 @@ class CtYunClient {
     return false;
   }
 
-  // 官方 App / PC 客户端抢占自愈：后台短暂让位后探测式恢复 (释放后脉冲从零重新计时)
-  yieldToExternalClient(durationMinutes = 2) {
+  // 官方 App / PC 客户端抢占自愈：后台主动让位后探测式恢复 (释放后脉冲从零重新计时)
+  yieldToExternalClient(durationMinutes = 5) {
     const accName = this.account.name || this.account.user;
     this.externalYieldUntil = Date.now() + durationMinutes * 60 * 1000;
-    appendLog('KeepAlive', `[${accName}] ⚡ 检测到官方客户端(App/PC)上线接入，后台长连接立即主动让位，每 ${durationMinutes} 分钟探测一次，从其释放后重新计算脉冲！`, 'info');
+    this.metrics.status = 'online';
+    this.metrics.lastHeartbeatResult = `官方客户端 (App/PC) 使用中，后台已主动让位避让 (剩余 ${durationMinutes} 分钟)`;
+    appendLog('KeepAlive', `[${accName}] ⚡ 检测到官方客户端 (App/PC/网页) 正在连接使用，后台长连接立即主动让位避让 ${durationMinutes} 分钟，杜绝争抢通道！`, 'info');
     if (this.endCurrentSession) {
       this.endCurrentSession('Yield to External Client');
     }
@@ -669,6 +676,168 @@ class CtYunClient {
     };
   }
 
+  // 解析天翼云全形态云电脑列表 (普通独立单机、政企桌面池 POOL、抢占式桌面)
+  static parseAllDesktops(data = {}) {
+    const list = [];
+    const seen = new Set();
+
+    // 1. 普通单机 (公众版 / 个人独立机 / 尊享版等)
+    if (Array.isArray(data.desktopList)) {
+      for (const item of data.desktopList) {
+        const id = String(item.desktopId || item.objId || '');
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          list.push({
+            desktopId: id,
+            objId: String(item.objId || id),
+            desktopName: item.desktopName || item.objName || '天翼云电脑',
+            desktopCode: item.desktopCode || '',
+            useStatusText: item.useStatusText || item.useStatus || '运行中',
+            useStatus: item.useStatus,
+            imageName: item.imageName || '',
+            flavorName: item.flavorName || item.prodGroupName || '',
+            objType: item.objType ?? 0,
+            isPool: false
+          });
+        }
+      }
+    }
+
+    // 2. 政企桌面池 (POOL)
+    if (Array.isArray(data.desktopPoolList)) {
+      for (const item of data.desktopPoolList) {
+        const poolId = String(item.poolId || item.objId || item.desktopId || '');
+        const id = String(item.desktopId || poolId);
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          list.push({
+            desktopId: id,
+            objId: poolId,
+            desktopName: item.poolName || item.desktopName || '天翼云电脑(政企桌面池)',
+            desktopCode: item.desktopCode || poolId,
+            useStatusText: item.useStatusText || item.useStatus || '运行中',
+            useStatus: item.useStatus,
+            imageName: item.imageName || '',
+            flavorName: item.flavorName || item.prodGroupName || '政企版',
+            objType: item.objType ?? 1,
+            isPool: true
+          });
+        }
+      }
+    }
+
+    // 3. 抢占式云电脑 (Preemption)
+    if (Array.isArray(data.preemptionDesktopList)) {
+      for (const item of data.preemptionDesktopList) {
+        const id = String(item.desktopId || item.objId || '');
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          list.push({
+            desktopId: id,
+            objId: id,
+            desktopName: item.desktopName || '天翼云电脑(抢占式)',
+            desktopCode: item.desktopCode || id,
+            useStatusText: item.useStatusText || item.useStatus || '运行中',
+            useStatus: item.useStatus,
+            imageName: item.imageName || '',
+            flavorName: item.flavorName || item.prodGroupName || '',
+            objType: item.objType ?? 2,
+            isPool: false
+          });
+        }
+      }
+    }
+
+    return list;
+  }
+
+  // 官方扫码登录 1: 生成二维码数据
+  async genQrCode() {
+    const res = await fetchWithTimeout('https://desk.ctyun.cn:8810/api/auth/client/qrCode/genData', {
+      method: 'POST',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/137.0.0.0',
+        'ctg-devicetype': this.deviceType,
+        'ctg-version': this.version,
+        'ctg-devicecode': this.account.deviceCode,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
+    });
+    const json = await res.json();
+    if (json.code !== 0 || !json.data?.qrCodeId) {
+      throw new Error(json.msg || '获取二维码失败');
+    }
+    const qrCodeId = json.data.qrCodeId;
+    let qrUrl = '';
+    if (json.data.qrCodeEndpoint) {
+      const endpoint = json.data.qrCodeEndpoint;
+      const sep = endpoint.includes('?') ? '&' : '?';
+      qrUrl = `${endpoint}${sep}qrCodeId=${encodeURIComponent(qrCodeId)}&loginMode=1`;
+    } else {
+      qrUrl = `https://desk.ctyun.cn/selforder/#/login-confirm?qrCodeId=${encodeURIComponent(qrCodeId)}&loginMode=1`;
+    }
+    return { qrCodeId, qrUrl };
+  }
+
+  // 官方扫码登录 2: 轮询二维码授权状态
+  async getQrCodeStatus(qrCodeId) {
+    const res = await fetchWithTimeout(`https://desk.ctyun.cn:8810/api/auth/client/qrCode/getStatus?qrCodeId=${encodeURIComponent(qrCodeId)}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/137.0.0.0',
+        'ctg-devicetype': this.deviceType,
+        'ctg-version': this.version,
+        'ctg-devicecode': this.account.deviceCode,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
+    });
+    const json = await res.json();
+    if (json.code !== 0 || !json.data) {
+      throw new Error(json.msg || '查询扫码状态失败');
+    }
+    return {
+      codeStatus: json.data.codeStatus,
+      loginToken: json.data.loginToken || undefined
+    };
+  }
+
+  // 官方扫码登录 3: 通过 Token 换取正式会话
+  async loginByToken(accessToken) {
+    const res = await fetchWithTimeout('https://desk.ctyun.cn:8810/api/auth/client/tokenLogin', {
+      method: 'POST',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/137.0.0.0',
+        'ctg-devicetype': this.deviceType,
+        'ctg-version': this.version,
+        'ctg-devicecode': this.account.deviceCode,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        accessToken,
+        osType: 'Windows',
+        deviceModel: 'Windows NT 10.0; Win64; x64',
+        appVersion: '3.2.0',
+        deviceCode: this.account.deviceCode,
+        deviceName: 'Chrome浏览器',
+        deviceType: this.deviceType,
+        sysVersion: 'Windows NT 10.0; Win64; x64',
+        clientVersion: this.version
+      })
+    });
+    const json = await res.json();
+    if (json.code !== 0 && json.code !== 200) {
+      throw new Error(json.msg || '扫码登录验证失败');
+    }
+    this.loginInfo = json.data;
+    this.account.savedLoginInfo = json.data;
+    this.account.bound = true;
+    this.account.sessionExpired = false;
+    if (json.data.mobilephone) {
+      this.account.user = json.data.mobilephone;
+    }
+    saveConfig(appConfig);
+    return json.data;
+  }
+
   async getDesktops() {
     for (let attempt = 1; attempt <= 2; attempt++) {
       if (!this.loginInfo) {
@@ -676,7 +845,7 @@ class CtYunClient {
         if (!logRes.success) throw new Error(logRes.error);
       }
 
-      // 1. 优先使用全规格 pageDesktop 查询云电脑
+      // 1. 优先使用全规格 pageDesktop 查询云电脑 (支持独立机、池化及抢占式)
       try {
         const res = await fetchWithTimeout('https://desk.ctyun.cn:8810/api/desktop/client/pageDesktop', {
           method: 'POST',
@@ -688,9 +857,10 @@ class CtYunClient {
         });
         const json = await res.json();
         if (json.code === 0 && json.data) {
-          const list = json.data.desktopList || json.data.desktopPoolList || [];
+          const list = CtYunClient.parseAllDesktops(json.data);
           if (list.length > 0) {
-            this.checkExternalPowerOn(list[0]);
+            this.desktopsCache = list;
+            for (const d of list) this.checkExternalPowerOn(d);
             return list;
           }
         }
@@ -704,9 +874,10 @@ class CtYunClient {
         });
         const jsonList = await resList.json();
         if (jsonList.code === 0 && jsonList.data) {
-          const list = jsonList.data.desktopList || jsonList.data.desktopPoolList || [];
+          const list = CtYunClient.parseAllDesktops(jsonList.data);
           if (list.length > 0) {
-            this.checkExternalPowerOn(list[0]);
+            this.desktopsCache = list;
+            for (const d of list) this.checkExternalPowerOn(d);
             return list;
           }
         }
@@ -1044,16 +1215,7 @@ class CtYunClient {
           }
         }
 
-        // 外部设备（官方手机 App / PC 客户端）抢占自愈避让机制：若检测到外部登录冲突，自动避让
-        if (this.externalYieldUntil && Date.now() < this.externalYieldUntil) {
-          const waitMinutesLeft = Math.ceil((this.externalYieldUntil - Date.now()) / 60000);
-          this.metrics.status = 'online';
-          this.metrics.lastHeartbeatResult = `外部设备（官方App/PC）使用中，自愈让位等待中 (剩余 ${waitMinutesLeft} 分钟)`;
-          await new Promise(r => setTimeout(r, 15000));
-          continue;
-        } else {
-          this.externalYieldUntil = 0;
-        }
+        // 旁观者通道无需任何避让等待：断开即结束本周期，直接按脉冲间隔进入下一轮
 
         // 1. 查询云电脑当前最新状态
         const desktops = await this.getDesktops();
@@ -1140,14 +1302,12 @@ class CtYunClient {
             lastConnError = e.message || '';
           }
           if (desktopInfo && desktopInfo.clinkLvsOutHost) break;
-          // 外部客户端占用探测：官方App/PC/浏览器正在使用时，天翼云会拒绝新连接，让位等待其释放
+          // 官方占用语义提示：旁观通道不认领会话，即使被占用也仅记录，下个脉冲周期自动重试
           if (lastConnError.includes('其他设备') || lastConnError.includes('其他地方') || lastConnError.includes('正在使用') ||
               lastConnError.includes('占用') || lastConnError.includes('稍后再试') || lastConnError.includes('使用中')) {
             this.metrics.status = 'online';
-            this.metrics.lastHeartbeatResult = '外部客户端 (官方App/PC/浏览器) 使用中，脉冲让位等待，将从其释放断开后重新计时';
-            appendLog('KeepAlive', `[${accName}] 检测到云电脑正被外部客户端占用 (${lastConnError})，脉冲让位每2分钟探测，从释放后重新计时...`, 'info');
-            this.externalYieldUntil = Date.now() + 2 * 60 * 1000;
-            await new Promise(r => setTimeout(r, 15000));
+            this.metrics.lastHeartbeatResult = '官方客户端可能正在使用，旁观通道将在下个脉冲周期自动重试';
+            appendLog('KeepAlive', `[${accName}] connect 探测提示占用 (${lastConnError})，旁观通道将在下个脉冲周期自动重试。`, 'info');
             break;
           }
           if (connAttempt < 5) {
@@ -1173,6 +1333,7 @@ class CtYunClient {
           let isClosingSelf = false;
           let sessionTimeout = null;
           let hangCheckInterval = null;
+          let wsConnectedAt = 0;
 
           const endSession = (reason) => {
             if (cycleDone) return;
@@ -1238,6 +1399,9 @@ class CtYunClient {
           };
 
           this.ws.on('open', () => {
+            wsConnectedAt = Date.now();
+            this.sessionConflictStreak = 0; // 成功建连即清零冲突退避计数
+            this.conflictRetryUntil = 0;
             this.wsAlive = true;
             this.metrics.status = 'online';
             this.metrics.successCount++;
@@ -1337,54 +1501,61 @@ class CtYunClient {
                   safeSend(sendBuf);
                   appendLog('Heartbeat', `[${accName}] -> ✅ 已回传 118 身份 (用户ID: ${this.loginInfo.userId})，在线状态已激活！`, 'success');
 
-                  // 核心协议补全 1: 发送 Type 112 (CLINK_MSGC_MAIN_CLIENT_LOGIN_INFO) 会话凭据包
-                  // 官方任务中心正是在此握手点记录终端正式连入云电脑会话并确认「登录AI云电脑」达成！
-                  try {
-                    const sId = desktopInfo.token || '';
-                    const dType = this.deviceType ? String(this.deviceType) : '';
-                    const dCode = this.account.deviceCode || '';
-                    const uAcc = this.loginInfo.userName || '';
+                  // 会话认领分级 (旁观者脉冲保活机制，彻底解决互踢)：
+                  // 仅挂机模式 (isHangMode) 发送 Type 112 (会话凭据认领) + Type 104 (通道挂接) 以累加 1 小时任务时长；
+                  // 脉冲模式为纯旁观者姿态 —— 只握手 + REDQ + 118 身份 + 心跳，绝不认领桌面会话，PC/手机客户端随时接入永不被踢！
+                  if (isHangMode) {
+                    // 核心协议补全 1: 发送 Type 112 (CLINK_MSGC_MAIN_CLIENT_LOGIN_INFO) 会话凭据包
+                    // 官方任务中心正是在此握手点记录终端正式连入云电脑会话并确认「登录AI云电脑」达成！
+                    try {
+                      const sId = desktopInfo.token || '';
+                      const dType = this.deviceType ? String(this.deviceType) : '';
+                      const dCode = this.account.deviceCode || '';
+                      const uAcc = this.loginInfo.userName || '';
 
-                    const sIdLen = Buffer.byteLength(sId, 'utf8') + 1;
-                    const dTypeLen = Buffer.byteLength(dType, 'utf8') + 1;
-                    const dCodeLen = Buffer.byteLength(dCode, 'utf8') + 1;
-                    const uAccLen = Buffer.byteLength(uAcc, 'utf8') + 1;
+                      const sIdLen = Buffer.byteLength(sId, 'utf8') + 1;
+                      const dTypeLen = Buffer.byteLength(dType, 'utf8') + 1;
+                      const dCodeLen = Buffer.byteLength(dCode, 'utf8') + 1;
+                      const uAccLen = Buffer.byteLength(uAcc, 'utf8') + 1;
 
-                    const dataSize = 36 + sIdLen + dTypeLen + dCodeLen + uAccLen;
-                    const dataBuf = Buffer.alloc(dataSize);
-                    let offset = 0;
-                    let strOffset = 36;
+                      const dataSize = 36 + sIdLen + dTypeLen + dCodeLen + uAccLen;
+                      const dataBuf = Buffer.alloc(dataSize);
+                      let offset = 0;
+                      let strOffset = 36;
 
-                    dataBuf.writeUInt32LE(Number(desktopId), offset); offset += 4;
-                    dataBuf.writeUInt32LE(sIdLen, offset); offset += 4;
-                    dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += sIdLen;
-                    dataBuf.writeUInt32LE(dTypeLen, offset); offset += 4;
-                    dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += dTypeLen;
-                    dataBuf.writeUInt32LE(dCodeLen, offset); offset += 4;
-                    dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += dCodeLen;
-                    dataBuf.writeUInt32LE(uAccLen, offset); offset += 4;
-                    dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += uAccLen;
+                      dataBuf.writeUInt32LE(Number(desktopId), offset); offset += 4;
+                      dataBuf.writeUInt32LE(sIdLen, offset); offset += 4;
+                      dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += sIdLen;
+                      dataBuf.writeUInt32LE(dTypeLen, offset); offset += 4;
+                      dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += dTypeLen;
+                      dataBuf.writeUInt32LE(dCodeLen, offset); offset += 4;
+                      dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += dCodeLen;
+                      dataBuf.writeUInt32LE(uAccLen, offset); offset += 4;
+                      dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += uAccLen;
 
-                    dataBuf.write(sId, offset, 'utf8'); offset += sIdLen;
-                    dataBuf.write(dType, offset, 'utf8'); offset += dTypeLen;
-                    dataBuf.write(dCode, offset, 'utf8'); offset += dCodeLen;
-                    dataBuf.write(uAcc, offset, 'utf8'); offset += uAccLen;
+                      dataBuf.write(sId, offset, 'utf8'); offset += sIdLen;
+                      dataBuf.write(dType, offset, 'utf8'); offset += dTypeLen;
+                      dataBuf.write(dCode, offset, 'utf8'); offset += dCodeLen;
+                      dataBuf.write(uAcc, offset, 'utf8'); offset += uAccLen;
 
-                    const msgBuf112 = Buffer.alloc(6 + dataSize);
-                    msgBuf112.writeUInt16LE(112, 0); // Type 112
-                    msgBuf112.writeUInt32LE(dataSize, 2);
-                    dataBuf.copy(msgBuf112, 6);
+                      const msgBuf112 = Buffer.alloc(6 + dataSize);
+                      msgBuf112.writeUInt16LE(112, 0); // Type 112
+                      msgBuf112.writeUInt32LE(dataSize, 2);
+                      dataBuf.copy(msgBuf112, 6);
 
-                    safeSend(msgBuf112);
-                  } catch (e) {}
+                      safeSend(msgBuf112);
+                    } catch (e) {}
 
-                  // 核心协议补全 2: 发送 Type 104 (CLINK_MSGC_MAIN_ATTACH_CHANNELS) 通道挂接就绪包
-                  try {
-                    const msgBuf104 = Buffer.alloc(6);
-                    msgBuf104.writeUInt16LE(104, 0); // Type 104
-                    msgBuf104.writeUInt32LE(0, 2);
-                    safeSend(msgBuf104);
-                  } catch (e) {}
+                    // 核心协议补全 2: 发送 Type 104 (CLINK_MSGC_MAIN_ATTACH_CHANNELS) 通道挂接就绪包
+                    try {
+                      const msgBuf104 = Buffer.alloc(6);
+                      msgBuf104.writeUInt16LE(104, 0); // Type 104
+                      msgBuf104.writeUInt32LE(0, 2);
+                      safeSend(msgBuf104);
+                    } catch (e) {}
+                  } else {
+                    appendLog('Heartbeat', `[${accName}] 脉冲旁观者模式已激活：不认领桌面会话 (无 112/104)，官方客户端随时接入永不被踢。`, 'info');
+                  }
 
                   // 核心协议补全 3: 启动定时 Type 7 (CLINK_MSGC_HEARTBEAT) 双向心跳维持
                   // 天翼云网关据此计算活跃持续在线秒数，平滑累加挂机 1 小时 (3600秒) 时长！
@@ -1433,11 +1604,10 @@ class CtYunClient {
                   }
                 }
 
-                // 核心协议检测：收到服务端 Type 119 (CLINK_MSG_MAIN_CLIENT_OFFLINE) 或强制下线信号
-                // 代表官方手机 App / PC 端正在登录或发生抢占，后台长连接光速让位
+                // 核心协议检测：收到服务端 Type 119 (CLINK_MSG_MAIN_CLIENT_OFFLINE) 等状态通知
+                // 旁观通道不认领会话，收到通知仅记录，无需避让
                 if (type === 119 || type === 120 || type === 137) {
-                  appendLog('KeepAlive', `[${accName}] 收到云电脑客户端状态通知 (${type})，主动避让官方客户端...`, 'info');
-                  this.yieldToExternalClient(2);
+                  appendLog('Heartbeat', `[${accName}] 收到客户端状态通知 (${type})，旁观通道持续待命 (不影响官方客户端)。`, 'info');
                   return;
                 }
               }
@@ -1454,12 +1624,16 @@ class CtYunClient {
 
           this.ws.on('close', (code, reason) => {
             const reasonStr = String(reason || '');
-            // 只有当非自主关闭且收到抢占/被踢状态码时，才认定为外部客户端抢占并让位
-            if (!isClosingSelf && (code === 4001 || reasonStr.includes('preempt') || reasonStr.includes('conflict') || reasonStr.includes('kick'))) {
-              appendLog('KeepAlive', `[${accName}] 检测到外部设备正在登入云电脑 (状态码: ${code})，后台主动让位 2 分钟！`, 'info');
-              this.yieldToExternalClient(2);
+            const heldSec = wsConnectedAt ? Math.floor((Date.now() - wsConnectedAt) / 1000) : 0;
+
+            // 旁观者通道断开零危害：本通道从不认领桌面会话 (无 112/104)，
+            // 被网关拒接/断开均不影响真实客户端，一律按脉冲周期自动重连，无需任何避让！
+            if (isClosingSelf) {
+              appendLog('Heartbeat', `[${accName}] 保活长连接正常轮转关闭 (${code} - ${reason || '周期重连'})`, 'info');
+            } else if (code >= 4000 || reasonStr.includes('preempt') || reasonStr.includes('kick') || reasonStr.includes('conflict')) {
+              appendLog('Heartbeat', `[${accName}] 收到网关信令 (${code})，旁观通道随即让位，将按脉冲周期自动重连 (不影响官方客户端)。`, 'info');
             } else {
-              appendLog('Heartbeat', `[${accName}] 保活长连接正常关闭 (${code} - ${reason || '正常轮转'})`, 'info');
+              appendLog('Heartbeat', `[${accName}] 旁观通道被网关断开 (状态码: ${code}，已保持 ${heldSec} 秒)，属正常现象，按脉冲周期自动重连。`, 'info');
             }
             endSession('Closed');
           });
@@ -1470,7 +1644,9 @@ class CtYunClient {
         // 脉冲模式决策：未开启挂机或挂机已达标时，长连接关闭后进入长时间脉冲休眠 (每 pulseIntervalMinutes 分钟短暂连接一次重置天翼云 1 小时休眠计时器)
         // 挂机模式：短休 2 秒后立即进入下一轮连接，确保持续不间断挂机累加时长直至满 3600 秒达成！
         if (!isHangMode) {
-          const pulseGapSec = Math.min(55, Math.max(5, parseInt(appConfig.settings?.pulseIntervalMinutes) || 45)) * 60;
+          // 脉冲间隔按秒配置 (10~3300 秒)，兼容旧版"分钟"配置字段
+          const pulseGapSec = Math.min(3300, Math.max(10, parseInt(appConfig.settings?.pulseIntervalSeconds) || (parseInt(appConfig.settings?.pulseIntervalMinutes) ? parseInt(appConfig.settings.pulseIntervalMinutes) * 60 : 30)));
+          this.metrics.pulseIntervalSeconds = pulseGapSec;
           let waited = 0;
           while (waited < pulseGapSec && this.workerRunning) {
             if (this.account.sessionExpired) break;
@@ -1489,21 +1665,17 @@ class CtYunClient {
             // 占用检测：浏览器访问中 → 暂停倒计时，其关闭释放后从零重新计时
             if (this.isWebUserActive && Date.now() < this.webUserActiveUntil) {
               this.metrics.lastHeartbeatResult = '浏览器访问云电脑中，脉冲计时已暂停，将从其关闭断开后重新计算';
-              await new Promise(r => setTimeout(r, 10000));
+              await new Promise(r => setTimeout(r, 5000));
               waited = 0;
               continue;
             }
 
-            // 外部客户端 (官方App/PC) 避让期 → 退出待机循环，转入探测模式直至其释放后重新脉冲计时
-            if (this.externalYieldUntil && Date.now() < this.externalYieldUntil) {
-              this.metrics.lastHeartbeatResult = '外部客户端 (官方App/PC) 使用中，脉冲让位等待，将从其释放断开后重新计时';
-              break;
-            }
-
+            const remain = pulseGapSec - waited;
+            const remainText = remain >= 180 ? `约 ${Math.ceil(remain / 60)} 分钟` : `约 ${remain} 秒`;
             const pulseReason = todayHangDone ? '今日任务已达标' : '未开启挂机功能';
-            this.metrics.lastHeartbeatResult = `🟢 脉冲保活待机中 (${pulseReason}，约 ${Math.ceil((pulseGapSec - waited) / 60)} 分钟后短暂连接，通道空闲不影响官方App)`;
-            await new Promise(r => setTimeout(r, 60000));
-            waited += 60;
+            this.metrics.lastHeartbeatResult = `🟢 脉冲旁观者待机中 (${pulseReason}，${remainText}后短暂连接，旁观通道永不影响官方App)`;
+            await new Promise(r => setTimeout(r, 10000));
+            waited += 10;
           }
         } else {
           // 挂机模式下：短休 2 秒后立即进入下一轮连接，确保持续不间断挂机累加时长直至满 3600 秒达成！
@@ -1584,11 +1756,20 @@ function serveStatic(res, filePath, contentType) {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('File Not Found');
     } else {
+      let content = data;
+      // 若返回 HTML，动态将当前最新的系统主标题注入模板，杜绝页面刷新时回跳闪烁！
+      if (contentType.includes('text/html')) {
+        let htmlStr = data.toString('utf8');
+        const currentTitle = appConfig.settings?.systemTitle || '天翼云自动化控制中心';
+        htmlStr = htmlStr.replace(/<h1 id="main-system-title">[^<]*<\/h1>/, `<h1 id="main-system-title">${currentTitle}<\/h1>`);
+        htmlStr = htmlStr.replace(/<title>[^<]*<\/title>/, `<title>${currentTitle} - 多账号保活控制台<\/title>`);
+        content = Buffer.from(htmlStr, 'utf8');
+      }
       res.writeHead(200, {
         'Content-Type': contentType,
         'Cache-Control': 'no-cache'
       });
-      res.end(data);
+      res.end(content);
     }
   });
 }
@@ -1748,7 +1929,12 @@ const server = http.createServer(async (req, res) => {
         res.end('<h3 style="font-family:sans-serif;padding:20px;">未检测到名下可用云电脑</h3>');
         return;
       }
-      const desktop = desktops[0];
+      const requestedDesktopId = parsedUrl.searchParams.get('desktopId');
+      let desktop = desktops[0];
+      if (requestedDesktopId) {
+        const matched = desktops.find(d => String(d.objId || d.desktopId) === String(requestedDesktopId));
+        if (matched) desktop = matched;
+      }
       const objId = desktop.objId || desktop.desktopId;
       const b64Id = Buffer.from(String(objId)).toString('base64');
 
@@ -1981,7 +2167,7 @@ const server = http.createServer(async (req, res) => {
 
   // 1. 静态资源
   if (pathname === '/' || pathname === '/index.html') {
-    serveStatic(res, path.join(STATIC_DIR, 'index.html'), 'text/html; charset=utf-8');
+    serveStatic(res, path.join(STATIC_DIR, 'index.html'), 'text/html');
     return;
   }
   if (pathname.startsWith('/static/')) {
@@ -2148,6 +2334,7 @@ const server = http.createServer(async (req, res) => {
       const accountsCount = appConfig.accounts.filter(a => a.ownerId === session.userId).length;
       jsonResponse(res, {
         isLoggedIn: true,
+        systemTitle: appConfig.settings?.systemTitle || '天翼云自动化控制中心',
         user: {
           id: user.id,
           username: user.username,
@@ -2161,7 +2348,8 @@ const server = http.createServer(async (req, res) => {
       jsonResponse(res, {
         isLoggedIn: false,
         allowRegistration: appConfig.settings?.allowRegistration === true,
-        defaultQuota: appConfig.settings?.defaultQuota || 2
+        defaultQuota: appConfig.settings?.defaultQuota || 2,
+        systemTitle: appConfig.settings?.systemTitle || '天翼云自动化控制中心'
       });
     }
     return;
@@ -2351,6 +2539,8 @@ const server = http.createServer(async (req, res) => {
       const client = getClient(acc);
       return {
         ...acc,
+        desktops: client.desktopsCache || [],
+        pulseIntervalSeconds: parseInt(appConfig.settings?.pulseIntervalSeconds) || (parseInt(appConfig.settings?.pulseIntervalMinutes) ? parseInt(appConfig.settings.pulseIntervalMinutes) * 60 : 30),
         liveMetrics: client.metrics
       };
     });
@@ -2426,6 +2616,7 @@ const server = http.createServer(async (req, res) => {
       user,
       password: pwd,
       deviceCode: devCode,
+      savedLoginInfo: loginData,
       displayConfig: {
         width: 2560,
         height: 1440,
@@ -2433,6 +2624,7 @@ const server = http.createServer(async (req, res) => {
       },
       enabled: true,
       bound: isBound,
+      sessionExpired: false,
       features: {
         keepAlive: true,
         autoSign: true,
@@ -2656,6 +2848,129 @@ const server = http.createServer(async (req, res) => {
         challengeCode,
         challengeId,
         captchaImage: base64Img
+      });
+    } catch (e) {
+      jsonResponse(res, { error: e.message }, 500);
+    }
+    return;
+  }
+
+  // 10.6 生成天翼云官方 App 扫码登录二维码 API
+  if (req.method === 'POST' && pathname === '/api/account/qrcode/generate') {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请先登录后再操作' }, 401);
+      return;
+    }
+
+    const devCode = generateDeviceCode();
+    const tempClient = new CtYunClient({ deviceCode: devCode, user: 'qrcode_temp' });
+    try {
+      const qrData = await tempClient.genQrCode();
+      jsonResponse(res, {
+        success: true,
+        deviceCode: devCode,
+        qrCodeId: qrData.qrCodeId,
+        qrUrl: qrData.qrUrl
+      });
+    } catch (e) {
+      jsonResponse(res, { error: e.message || '生成官方二维码失败' }, 500);
+    }
+    return;
+  }
+
+  // 10.7 轮询天翼云官方 App 扫码状态 API
+  if (req.method === 'GET' && pathname === '/api/account/qrcode/status') {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请先登录后再操作' }, 401);
+      return;
+    }
+
+    const qrCodeId = parsedUrl.searchParams.get('qrCodeId');
+    const deviceCode = parsedUrl.searchParams.get('deviceCode') || generateDeviceCode();
+    const accountName = (parsedUrl.searchParams.get('accountName') || '').trim();
+
+    if (!qrCodeId) {
+      jsonResponse(res, { error: '缺少 qrCodeId 参数' }, 400);
+      return;
+    }
+
+    const tempClient = new CtYunClient({ deviceCode, user: 'qrcode_temp' });
+    try {
+      const statusRes = await tempClient.getQrCodeStatus(qrCodeId);
+      if (statusRes.codeStatus === 'authorize' && statusRes.loginToken) {
+        appendLog('Auth', `[扫码登录] 手机端已授权确认，正在换取正式登录凭据...`, 'info');
+        const loginData = await tempClient.loginByToken(statusRes.loginToken);
+        const userPhone = loginData.mobilephone || loginData.userName || '已扫码账号';
+        const finalName = accountName || `天翼账号_${userPhone.slice(-4)}`;
+
+        const currentOwnerId = session.userId;
+        const id = crypto.randomUUID().substring(0, 8);
+        const newAcc = {
+          id,
+          ownerId: currentOwnerId,
+          name: finalName,
+          user: userPhone,
+          password: '',
+          deviceCode,
+          savedLoginInfo: loginData,
+          displayConfig: { width: 2560, height: 1440, scale: 150 },
+          enabled: true,
+          bound: true,
+          sessionExpired: false,
+          features: {
+            keepAlive: true,
+            autoSign: true,
+            aiChat: true,
+            cloudHang: false,
+            autoRedeem: false
+          },
+          redeemConfig: {
+            enabled: false,
+            targetType: 'redeem',
+            desktopId: '',
+            desktopName: '',
+            prodId: 17023101,
+            prodName: '8C16G升配包1天 (500积分)',
+            prodType: 'pointstplupgrade',
+            costPoints: 500,
+            maxRedeemTimes: 0,
+            scheduleType: 'monthly_days',
+            monthlyDays: [-1],
+            intervalDays: 1,
+            lastRedeemDate: ''
+          },
+          stats: {
+            lastSignTime: '',
+            lastAiChatTime: '',
+            lastHangTime: '',
+            hangMinutesToday: 0,
+            points: 0,
+            keepAliveStatus: 'online',
+            lastError: ''
+          }
+        };
+
+        appConfig.accounts.push(newAcc);
+        saveConfig(appConfig);
+
+        const client = getClient(newAcc);
+        client.loginInfo = loginData;
+        client.startKeepAliveWorker();
+
+        appendLog('Auth', `[${finalName}] 🎉 官方扫码授权成功！已绑定并上线保活。`, 'success');
+        jsonResponse(res, {
+          success: true,
+          codeStatus: 'authorize',
+          account: newAcc
+        });
+        return;
+      }
+
+      jsonResponse(res, {
+        success: true,
+        codeStatus: statusRes.codeStatus
       });
     } catch (e) {
       jsonResponse(res, { error: e.message }, 500);
@@ -2995,7 +3310,12 @@ const server = http.createServer(async (req, res) => {
         jsonResponse(res, { error: '未检测到可用云电脑' }, 400);
         return;
       }
-      const desktop = desktops[0];
+      const requestedDesktopId = parsedUrl.searchParams.get('desktopId');
+      let desktop = desktops[0];
+      if (requestedDesktopId) {
+        const matched = desktops.find(d => String(d.objId || d.desktopId) === String(requestedDesktopId));
+        if (matched) desktop = matched;
+      }
       const objId = desktop.objId || desktop.desktopId;
       const b64Id = Buffer.from(String(objId)).toString('base64');
       const targetUrl = `https://pc.ctyun.cn/#/desktop?id=${encodeURIComponent(b64Id)}`;
@@ -3004,7 +3324,7 @@ const server = http.createServer(async (req, res) => {
       const sessionToken = getSessionFromReq(req)?.token || (parsedUrl.searchParams.get('token') || '');
 
       // 直通操作页面入口 URL (带授权 Token 和云电脑 ID)
-      const directViewUrl = `/desktop-view?accId=${accId}&token=${encodeURIComponent(sessionToken || '')}`;
+      const directViewUrl = `/desktop-view?accId=${accId}&token=${encodeURIComponent(sessionToken || '')}&desktopId=${encodeURIComponent(objId)}`;
 
       // 构造免密直达认证包 (localStorage.authData + web_device_code + authExpiredAt)
       const authDataObj = {
@@ -3067,7 +3387,6 @@ const server = http.createServer(async (req, res) => {
     const prodName = body.prodName || '商品';
     const prodType = body.prodType || 'pointstplupgrade';
     const costPoints = parseInt(body.costPoints) || 0;
-    const desktopId = parseInt(body.desktopId) || 0;
     const times = Math.max(1, parseInt(body.times) || 1);
 
     if (!prodId || costPoints <= 0) {
@@ -3077,84 +3396,117 @@ const server = http.createServer(async (req, res) => {
 
     const client = getClient(acc);
     try {
-      await client.refreshOfficialTasks();
-      const currentPts = client.metrics.userPoints || 0;
+      // 下单前零预热：直接使用内存缓存数据，杜绝下单前一刻的连环查询触发风控请求指纹
+      const cachedPts = client.metrics.userPoints || acc.stats?.points || 0;
       const totalCost = costPoints * times;
-      if (currentPts < totalCost) {
-        jsonResponse(res, { error: `积分不足：当前拥有 ${currentPts} 积分，本次兑换需要 ${totalCost} 积分！` }, 400);
+      if (cachedPts > 0 && cachedPts < totalCost) {
+        jsonResponse(res, { error: `积分不足：当前拥有 ${cachedPts} 积分，本次兑换需要 ${totalCost} 积分！` }, 400);
         return;
       }
 
-      // 查询绑定的云电脑详情（若为升配商品，需携带实例信息）
-      let targetProdInstId = body.prodInstId || '';
-      if (!targetProdInstId && desktopId) {
-        try {
-          const desktops = await client.getDesktops();
-          const d = desktops.find(item => String(item.objId || item.desktopId) === String(desktopId));
-          if (d && d.prodInstId) targetProdInstId = d.prodInstId;
-        } catch (e) {}
+      // 目标云电脑：优先用请求指定，其次用内存缓存，不做任何实时查询
+      const targetDesktopId = parseInt(body.desktopId) || parseInt(client.metrics.desktopId) || parseInt(acc.stats?.desktopId) || 0;
+      if (!targetDesktopId) {
+        jsonResponse(res, { error: '未找到绑定的云电脑，请先在卡片中确认名下设备后再兑换！' }, 400);
+        return;
       }
 
-      // 天翼云 PaaS 商城 placeOrder 规约构建 SKU 属性
-      // 1. pointsdiskupgrade（数据盘）及普通兑换类商品：官方前端 attrs 为空数组 []，由商城发货兑换凭证/券码
-      // 2. pointstplupgrade（升配包）：若指定云电脑，提供目标实例 ID
-      const skuAttrs = [];
-      if (prodType === 'pointstplupgrade' && (targetProdInstId || desktopId)) {
-        skuAttrs.push({
-          attrKey: targetProdInstId ? 'prodInstId' : 'bindDesktopId',
-          attrVal: String(targetProdInstId || desktopId)
-        });
-      }
-
-      appendLog('Redeem', `[${acc.name}] 正在向天翼云发起真实下单: ${prodName} x${times}，消耗 ${totalCost} 积分 (商品类型: ${prodType})...`, 'info');
+      appendLog('Redeem', `[${acc.name}] 正在向天翼云发起真实下单: ${prodName} x${times}，预计消耗 ${totalCost} 积分 (商品类型: ${prodType})...`, 'info');
 
       const placeOrderUrl = 'https://desk.ctyun.cn/selforder/api/selforder/paas/placeOrder';
-      const orderPayload = {
-        busiChannel: '010',
-        orderType: 1,
-        pointType: prodId >= 18000000 ? 500 : 1, // 天翼云积分类型：MBPOINTS对应500，POINTS通用积分对应1
-        points: totalCost,
-        sku: Array.from({ length: times }).map((_, idx) => ({
-          execSort: idx + 1,
-          prodId,
-          prodType,
-          attrs: skuAttrs
-        }))
-      };
+      let successCount = 0;
+      let lastError = '';
+      let isRisk = false;
 
-      const orderRes = await fetch(placeOrderUrl, {
-        method: 'POST',
-        headers: client.getSignedHeaders({ 'Content-Type': 'application/json;charset=UTF-8' }),
-        body: JSON.stringify(orderPayload)
-      });
-      const orderData = await orderRes.json();
+      // 多件拆单：与官方网页前端完全一致 —— 每次只提交 1 个 SKU、单件积分价，串行下单模拟真人连买
+      for (let round = 1; round <= times; round++) {
+        let orderSuccess = false;
+        // 单笔订单失败自动重试上限 3 次，每次间隔 3 秒；命中风控立即终止全部兑换
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            if (attempt > 1) {
+              appendLog('Redeem', `[${acc.name}] 第 ${round}/${times} 件第 ${attempt}/3 次自动重试...`, 'info');
+              await new Promise(r => setTimeout(r, 3000));
+            }
 
-      if (orderData.code === 0) {
-        await client.refreshOfficialTasks();
-        appendLog('Redeem', `[${acc.name}] 🎉 恭喜！成功兑换【${prodName} x${times}】，已消耗 ${totalCost} 积分！`, 'success');
+            // 报文与官方网页版前端逐字段一致（pointType 恒 1 / 单 SKU / execSort 恒 1 / bindDesktopId 数字型永携带）
+            const orderPayload = {
+              busiChannel: '010',
+              orderType: 1,
+              pointType: 1,
+              points: Number(costPoints),
+              sku: [{
+                execSort: 1,
+                prodId: Number(prodId),
+                prodType,
+                attrs: [{ attrKey: 'bindDesktopId', attrVal: targetDesktopId }]
+              }]
+            };
+
+            const orderRes = await fetch(placeOrderUrl, {
+              method: 'POST',
+              headers: client.getSignedHeaders({ 'Content-Type': 'application/json;charset=UTF-8' }),
+              body: JSON.stringify(orderPayload)
+            });
+            const orderData = await orderRes.json();
+
+            if (orderData.code === 0) {
+              successCount++;
+              orderSuccess = true;
+              appendLog('Redeem', `[${acc.name}] ✅ 第 ${successCount}/${times} 件兑换成功，消耗 ${costPoints} 积分！`, 'success');
+              break;
+            }
+
+            lastError = orderData.msg || `错误码 ${orderData.code}`;
+            if (lastError.includes('风控') || lastError.includes('频繁') || lastError.includes('异常操作')) {
+              isRisk = true;
+              break;
+            }
+            appendLog('Redeem', `[${acc.name}] 第 ${round}/${times} 件第 ${attempt} 次下单失败: ${lastError}`, 'warning');
+          } catch (e) {
+            lastError = e.message;
+          }
+        }
+
+        if (orderSuccess) {
+          // 件与件之间间隔 3 秒，模拟真人连买节奏
+          if (round < times) await new Promise(r => setTimeout(r, 3000));
+          continue;
+        }
+        // 失败即终止后续兑换，绝不连续发送异常报文
+        break;
+      }
+
+      if (successCount > 0) {
+        appendLog('Redeem', `[${acc.name}] 🎉 本次共成功兑换 ${successCount}/${times} 件【${prodName}】！`, 'success');
         sendNotification(
           appConfig.settings,
           `🎉 天翼云积分兑换成功 - ${acc.name}`,
-          `账号 [${acc.name}] 成功兑换 [${prodName} x${times}]，扣除 ${totalCost} 积分，当前剩余: ${client.metrics.userPoints} 积分。`
+          `账号 [${acc.name}] 成功兑换 [${prodName}] x${successCount}，共扣除 ${costPoints * successCount} 积分。`
         );
-        jsonResponse(res, { success: true, message: `兑换成功！消耗 ${totalCost} 积分，剩余 ${client.metrics.userPoints} 积分` });
+      }
+
+      // 下单动作已全部结束，此时再同步官方积分与任务状态（安全窗口）
+      await client.refreshOfficialTasks();
+
+      if (successCount === times) {
+        jsonResponse(res, { success: true, message: `兑换成功！共消耗 ${costPoints * successCount} 积分，剩余 ${client.metrics.userPoints} 积分` });
+      } else if (successCount > 0) {
+        jsonResponse(res, { success: true, partial: true, message: `部分成功：已兑换 ${successCount}/${times} 件${isRisk ? '，后续因触发风控而中止' : '，其余下单未成功'}`, error: lastError });
       } else {
         let errorReason = '';
-        const msg = orderData.msg || '';
-        if (msg.includes('风控') || orderData.code === 400) {
-          errorReason = '【触发天翼云反欺诈风控】原因：此前存在短时间内多次提交非法参数或超额积分请求，已被天翼云风控系统临时拦截。请使用天翼云电脑官方手机 APP 登录该账号进行一次常规操作（或短信验证）即可自动解除风控！';
+        const msg = lastError || '';
+        if (isRisk || msg.includes('风控')) {
+          errorReason = '【触发天翼云反欺诈风控】已被临时拦截，已自动停止重试防止加重。请使用官方手机 App 正常操作一次（或短信验证）即可自动解除！';
         } else if (msg.includes('unknow instType') || msg.includes('add subsku')) {
-          errorReason = `【商品属性不匹配】原因：该商品(${prodType})为独立发放型商品，无法直接作为云电脑子配置进行硬件绑定。已重置为商城直发规范。`;
+          errorReason = '【商品属性不匹配】该商品为独立发放型商品，无法作为云电脑子配置绑定。';
         } else if (msg.includes('目标资源不存在')) {
-          errorReason = '【目标资源不存在】原因：未找到绑定的云电脑实例或实例未运行，请先在电源管理确认开机后再进行硬件升配。';
+          errorReason = '【目标资源不存在】未找到有效绑定的云电脑，请确认设备在线后再试。';
         }
-
-        const fullLog = `下单失败: ${msg}${errorReason ? ' -> ' + errorReason : ''}`;
-        appendLog('Redeem', `[${acc.name}] ${fullLog}`, 'error');
-        jsonResponse(res, { 
-          error: `兑换失败(${orderData.code}): ${msg}`,
+        appendLog('Redeem', `[${acc.name}] 兑换失败: ${msg}${errorReason ? ' -> ' + errorReason : ''}`, 'error');
+        jsonResponse(res, {
+          error: `兑换失败: ${msg || '未成功'}`,
           reason: errorReason || '天翼云服务接口返回异常',
-          rawCode: orderData.code,
           rawMsg: msg
         }, 400);
       }
@@ -3189,15 +3541,17 @@ const server = http.createServer(async (req, res) => {
     const client = getClient(acc);
     try {
       const actionLower = (action || '').toLowerCase();
-      let desktopId = '';
+      let desktopId = parsedUrl.searchParams.get('desktopId') || '';
       
-      // 如果当前机器已处于关机状态，直接提取本地记录的 desktopId 进行开机，防止 getDesktops 过滤导致 400
-      try {
-        const desktops = await client.getDesktops();
-        if (desktops && desktops.length > 0) {
-          desktopId = desktops[0].objId || desktops[0].desktopId;
-        }
-      } catch (e) {}
+      // 如果未指定 desktopId，尝试从当前机器列表提取
+      if (!desktopId) {
+        try {
+          const desktops = await client.getDesktops();
+          if (desktops && desktops.length > 0) {
+            desktopId = desktops[0].objId || desktops[0].desktopId;
+          }
+        } catch (e) {}
+      }
 
       if (!desktopId) {
         desktopId = client.metrics.desktopId || acc.stats?.desktopId || '';
@@ -3502,7 +3856,7 @@ const server = http.createServer(async (req, res) => {
     // 管理员导入时若带 settings 则一并更新
     if (session.role === 'admin' && body.settings && typeof body.settings === 'object') {
       appConfig.settings = { ...appConfig.settings, ...body.settings };
-      appendLog('System', `⚠️ 备份文件包含系统设置，已一并还原 (保活周期: ${appConfig.settings.keepAliveSeconds}s / 脉冲间隔: ${appConfig.settings.pulseIntervalMinutes || 45}分钟 / 触发时间: ${appConfig.settings.cron?.executeTime || '01:20'})。如与预期不符，请前往「系统设置」核对调整。`, 'warning');
+      appendLog('System', `⚠️ 备份文件包含系统设置，已一并还原 (保活周期: ${appConfig.settings.keepAliveSeconds}s / 脉冲间隔: ${(appConfig.settings.pulseIntervalSeconds || (appConfig.settings.pulseIntervalMinutes || 45) * 60)}秒 / 触发时间: ${appConfig.settings.cron?.executeTime || '01:20'})。如与预期不符，请前往「系统设置」核对调整。`, 'warning');
     }
 
     saveConfig(appConfig);

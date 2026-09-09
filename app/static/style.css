@@ -343,6 +343,58 @@ header {
   opacity: 0.85;
 }
 
+/* 区域标题栏 (靠左紧凑并列排布) */
+.section-header {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 12px;
+  margin-top: 24px;
+  margin-bottom: 16px;
+  padding: 0 2px;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-main);
+  letter-spacing: -0.01em;
+}
+
+.section-title span {
+  font-size: 17px;
+}
+
+.btn-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  transition: all 0.2s ease;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+
+.btn-refresh:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+  border-color: #cbd5e1;
+  transform: translateY(-1px);
+}
+
+.btn-refresh:active {
+  transform: scale(0.97);
+}
+
 /* 账号卡片网格 */
 .accounts-grid {
   display: grid;
@@ -705,7 +757,7 @@ input:checked + .slider:before {
   width: 90%;
   max-width: 540px;
   max-height: 88vh;
-  overflow-y: auto;
+  overflow: hidden;
   box-shadow: var(--shadow-lg);
   display: flex;
   flex-direction: column;
@@ -724,6 +776,7 @@ input:checked + .slider:before {
   justify-content: space-between;
   align-items: center;
   background: #f8fafc;
+  flex-shrink: 0;
 }
 
 .modal-header h3 {
@@ -750,6 +803,8 @@ input:checked + .slider:before {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  overflow-y: auto;
+  flex: 1;
 }
 
 .modal-footer {
@@ -759,6 +814,7 @@ input:checked + .slider:before {
   justify-content: flex-end;
   gap: 10px;
   background: #f8fafc;
+  flex-shrink: 0;
 }
 
 .form-group {
@@ -798,7 +854,7 @@ input:checked + .slider:before {
   display: none !important;
 }
 
-/* Toast 提示 */
+/* Toast 提示 (设置 pointer-events: none 防止阻挡任何按钮点击) */
 #toast-container {
   position: fixed;
   top: 24px;
@@ -807,6 +863,7 @@ input:checked + .slider:before {
   flex-direction: column;
   gap: 10px;
   z-index: 2000;
+  pointer-events: none;
 }
 
 .toast {
@@ -817,6 +874,7 @@ input:checked + .slider:before {
   box-shadow: var(--shadow-lg);
   color: #ffffff;
   animation: slideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: auto;
 }
 
 .toast-success { background: #0f172a; border-left: 4px solid #16a34a; }

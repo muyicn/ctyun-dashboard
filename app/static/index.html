@@ -13,7 +13,7 @@
       <div class="logo-group">
         <div class="logo-icon">☁️</div>
         <div class="title-group">
-          <h1>天翼云自动化控制中心</h1>
+          <h1 id="main-system-title">天翼云自动化控制中心</h1>
           <p style="font-size: 13px; color: var(--text-muted); margin-top: 2px;">多账号长连接保活守护 · 每日签到打卡 · 智能挂机 · 自动兑换</p>
         </div>
       </div>
@@ -89,7 +89,7 @@
       <div class="section-title">
         <span>📋</span> 账号管理与自动化配置
       </div>
-      <button class="btn btn-sm" onclick="loadAccounts()">🔄 刷新列表</button>
+      <button class="btn-refresh" onclick="loadAccounts()">🔄 刷新列表</button>
     </div>
 
     <div class="accounts-grid" id="accounts-container">
@@ -124,7 +124,7 @@
     </div>
   </div>
 
-  <!-- 添加/编辑账号模态框 -->
+  <!-- 添加/编辑账号模态框 (支持官方扫码免密登录与密码登录双模式) -->
   <div class="modal-backdrop hidden" id="account-modal">
     <div class="modal">
       <div class="modal-header">
@@ -133,43 +133,73 @@
       </div>
       <div class="modal-body">
         <input type="hidden" id="acc-id">
-        <div class="form-group">
-          <label>账号备注名</label>
-          <input type="text" class="form-control" id="acc-name" placeholder="例如：主账号 / 小号1">
+        
+        <!-- 登录方式切换 Tab -->
+        <div id="acc-login-tabs" style="display: flex; gap: 8px; margin-bottom: 10px; border-bottom: 1px solid var(--border); padding-bottom: 8px;">
+          <button type="button" class="btn btn-sm btn-primary" id="tab-btn-qrcode" onclick="switchAccountLoginTab('qrcode')">📱 手机 App 扫码一键登录 (推荐)</button>
+          <button type="button" class="btn btn-sm" id="tab-btn-pwd" onclick="switchAccountLoginTab('pwd')">🔑 手机号密码登录</button>
         </div>
-        <div class="form-group">
-          <label>手机号 / 天翼账号 <span style="color:red">*</span></label>
-          <input type="text" class="form-control" id="acc-user" placeholder="请输入天翼云绑定的手机号">
-        </div>
-        <div class="form-group">
-          <label>密码 <span style="color:red">*</span></label>
-          <input type="password" class="form-control" id="acc-password" placeholder="请输入登录密码">
-        </div>
-        <div class="form-group">
-          <label>图形验证码 <span style="color:red">*</span></label>
-          <div style="display: flex; gap: 10px; align-items: center;">
-            <input type="text" class="form-control" id="acc-captcha-code" placeholder="输入4位验证码" maxlength="6" style="flex: 1; text-transform: uppercase;">
-            <div style="cursor: pointer; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; height: 38px; display: flex; align-items: center; background: #f8fafc;" onclick="refreshModalCaptcha()" title="点击换一张验证码">
-              <img id="acc-captcha-img" src="" alt="点击刷新" style="height: 38px; min-width: 85px; display: none;">
-              <span id="acc-captcha-loading" style="font-size: 12px; color: var(--text-muted); padding: 0 10px;">点击获取验证码</span>
+
+        <!-- 1. 扫码登录视图 -->
+        <div id="login-panel-qrcode" style="text-align: center; padding: 0;">
+          <div class="form-group" style="text-align: left; margin-bottom: 8px;">
+            <label style="margin-bottom: 2px;">账号备注名 (选填)</label>
+            <input type="text" class="form-control" id="qrcode-acc-name" placeholder="例如：主账号 / 上海电信 (留空则自动生成)">
+          </div>
+          <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 8px;">
+            请使用手机 <b>天翼云电脑 App</b> 或 <b>天翼账号</b> 扫一扫授权登录，免输验证码与短信！
+          </div>
+          <div id="qrcode-wrapper" style="display: inline-block; padding: 10px; background: #ffffff; border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); min-width: 170px; min-height: 170px;">
+            <img id="acc-qrcode-img" src="" style="width: 160px; height: 160px; display: none;">
+            <div id="acc-qrcode-loading" style="width: 160px; height: 160px; display: flex; align-items: center; justify-content: center; font-size: 13px; color: var(--text-muted);">
+              正在生成官方二维码...
             </div>
           </div>
-          <input type="hidden" id="acc-challenge-id">
-          <input type="hidden" id="acc-challenge-code">
-          <div class="form-text">输入手机号后点击图片即可获取天翼云官方验证码（如看不清可直接点击图片换一张）。</div>
-        </div>
-        <div class="form-group">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <label>设备码 (DeviceCode)</label>
-            <a href="javascript:void(0)" onclick="generateNewDeviceCode()" style="font-size: 12px; color: var(--accent);">重新随机生成</a>
+          <div id="acc-qrcode-hint" style="margin-top: 6px; font-size: 12px; color: #2563eb; font-weight: 600;">
+            等待扫码确认中...
           </div>
-          <input type="text" class="form-control" id="acc-device-code" placeholder="留空则系统自动随机生成32位持久设备码">
-          <div class="form-text">提示：持久化设备码可避免每次登录被风控要求短信验证码。</div>
+        </div>
+
+        <!-- 2. 账号密码登录视图 -->
+        <div id="login-panel-pwd" class="hidden">
+          <div class="form-group">
+            <label>账号备注名</label>
+            <input type="text" class="form-control" id="acc-name" placeholder="例如：主账号 / 小号1">
+          </div>
+          <div class="form-group">
+            <label>手机号 / 天翼账号 <span style="color:red">*</span></label>
+            <input type="text" class="form-control" id="acc-user" placeholder="请输入天翼云绑定的手机号">
+          </div>
+          <div class="form-group">
+            <label>密码 <span style="color:red">*</span></label>
+            <input type="password" class="form-control" id="acc-password" placeholder="请输入登录密码">
+          </div>
+          <div class="form-group">
+            <label>图形验证码 <span style="color:red">*</span></label>
+            <div style="display: flex; gap: 10px; align-items: center;">
+              <input type="text" class="form-control" id="acc-captcha-code" placeholder="输入4位验证码" maxlength="6" style="flex: 1; text-transform: uppercase;">
+              <div style="cursor: pointer; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; height: 38px; display: flex; align-items: center; background: #f8fafc;" onclick="refreshModalCaptcha()" title="点击换一张验证码">
+                <img id="acc-captcha-img" src="" alt="点击刷新" style="height: 38px; min-width: 85px; display: none;">
+                <span id="acc-captcha-loading" style="font-size: 12px; color: var(--text-muted); padding: 0 10px;">点击获取验证码</span>
+              </div>
+            </div>
+            <input type="hidden" id="acc-challenge-id">
+            <input type="hidden" id="acc-challenge-code">
+            <div class="form-text">输入手机号后点击图片即可获取天翼云官方验证码（如看不清可直接点击图片换一张）。</div>
+          </div>
+          <div class="form-group">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <label>设备码 (DeviceCode)</label>
+              <a href="javascript:void(0)" onclick="generateNewDeviceCode()" style="font-size: 12px; color: var(--accent);">重新随机生成</a>
+            </div>
+            <input type="text" class="form-control" id="acc-device-code" placeholder="留空则系统自动随机生成32位持久设备码">
+            <div class="form-text">提示：持久化设备码可避免每次登录被风控要求短信验证码。</div>
+          </div>
         </div>
       </div>
       <div class="modal-footer">
         <button class="btn" onclick="closeModal('account-modal')">取消</button>
-        <button class="btn btn-primary" onclick="saveAccount()">保存账号</button>
+        <button class="btn btn-primary" id="btn-save-account-pwd" onclick="saveAccount()" style="display: none;">保存账号</button>
       </div>
     </div>
   </div>
@@ -241,10 +271,11 @@
         </div>
 
         <div class="form-group" id="group-desktop-select">
-          <label>绑定目标云电脑 (用于配置升级)</label>
+          <label>绑定目标机器 (自动兑换将绑定此云电脑下单)</label>
           <select class="form-control" id="redeem-desktop-select">
             <option value="">正在获取名下设备...</option>
           </select>
+          <div class="form-text">显示账号名下全部云电脑与实时运行状态，选中的机器将作为自动兑换的绑定目标 (bindDesktopId)。</div>
         </div>
 
         <div class="form-group">
@@ -426,9 +457,16 @@
           <div class="form-text">【挂机模式生效】每日 1 小时任务未达标时，长连接保持该时长后强制重连刷新会话 (建议默认 60 秒)。</div>
         </div>
         <div class="form-group">
-          <label>脉冲保活间隔 (分钟)</label>
-          <input type="number" class="form-control" id="set-pulse-min" value="45" min="5" max="55">
-          <div class="form-text">【脉冲模式生效】每日任务达标后，每隔该时长进行一次短暂真实连接 (约 60 秒) 防止云电脑休眠。因天翼云断开 1 小时自动休眠，此值必须小于 60 分钟 (建议默认 45 分钟)；期间检测到浏览器/官方客户端占用时自动暂停，从其释放断开后重新计算。</div>
+          <label>脉冲保活间隔 (秒)</label>
+          <input type="number" class="form-control" id="set-pulse-sec" value="30" min="10" max="3300">
+          <div class="form-text">【旁观者脉冲】每隔该秒数进行一次短暂的旁观连接 (不认领会话、永不影响官方客户端)，持续重置云端 1 小时休眠计时器。范围 10~3300 秒，默认 30 秒。</div>
+        </div>
+
+        <h4 style="font-size: 14px; margin-top: 14px; color: var(--accent);">🏷️ 平台与品牌个性化</h4>
+        <div class="form-group">
+          <label>控制台主标题名称</label>
+          <input type="text" class="form-control" id="set-system-title" placeholder="天翼云自动化控制中心">
+          <div class="form-text">自定义顶部主标题，管理员修改后全局即时同步生效。</div>
         </div>
 
         <h4 style="font-size: 14px; margin-top: 14px; color: var(--accent);">👥 多用户开放注册与默认配额</h4>
@@ -533,32 +571,34 @@
     </div>
   </div>
 
-  <!-- 用户登录/注册模态框 -->
+  <!-- 用户登录/注册模态框 (使用 form 表单天然支持所有浏览器和手机端回车提交) -->
   <div class="modal-backdrop hidden" id="auth-modal">
     <div class="modal">
       <div class="modal-header">
         <h3 id="auth-modal-title">用户登录</h3>
-        <button class="modal-close" onclick="closeModal('auth-modal')">&times;</button>
+        <button class="modal-close" type="button" onclick="closeModal('auth-modal')">&times;</button>
       </div>
-      <div class="modal-body">
-        <div style="display: flex; gap: 10px; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 6px;">
-          <button class="btn btn-sm btn-primary" id="btn-auth-tab-login" onclick="switchAuthMode('login')">用户登录</button>
-          <button class="btn btn-sm" id="btn-auth-tab-reg" onclick="switchAuthMode('register')">新用户注册</button>
+      <form onsubmit="event.preventDefault(); submitAuth();">
+        <div class="modal-body">
+          <div style="display: flex; gap: 10px; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 6px;">
+            <button type="button" class="btn btn-sm btn-primary" id="btn-auth-tab-login" onclick="switchAuthMode('login')">用户登录</button>
+            <button type="button" class="btn btn-sm" id="btn-auth-tab-reg" onclick="switchAuthMode('register')">新用户注册</button>
+          </div>
+          <div class="form-group">
+            <label>用户名</label>
+            <input type="text" class="form-control" id="auth-username" placeholder="请输入用户名" required autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label>密码</label>
+            <input type="password" class="form-control" id="auth-password" placeholder="请输入密码" required autocomplete="current-password">
+          </div>
+          <div id="auth-tip" class="form-text" style="display: none;"></div>
         </div>
-        <div class="form-group">
-          <label>用户名</label>
-          <input type="text" class="form-control" id="auth-username" placeholder="请输入用户名">
+        <div class="modal-footer">
+          <button type="button" class="btn" onclick="closeModal('auth-modal')">取消</button>
+          <button type="submit" class="btn btn-primary" id="btn-auth-submit">登录</button>
         </div>
-        <div class="form-group">
-          <label>密码</label>
-          <input type="password" class="form-control" id="auth-password" placeholder="请输入密码">
-        </div>
-        <div id="auth-tip" class="form-text" style="display: none;"></div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn" onclick="closeModal('auth-modal')">取消</button>
-        <button class="btn btn-primary" id="btn-auth-submit" onclick="submitAuth()">登录</button>
-      </div>
+      </form>
     </div>
   </div>
 
@@ -649,6 +689,43 @@
       </div>
       <div class="modal-footer">
         <button class="btn" onclick="closeModal('admin-users-modal')">关闭</button>
+      </div>
+    </div>
+  </div>
+
+    <!-- 底部版权与版本号 -->
+    <footer style="margin-top: 32px; padding: 20px 0 10px 0; text-align: center; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 12.5px;">
+      <div>天翼云电脑可视化全功能多账号管理平台 · 纯协议超轻量架构</div>
+      <div style="margin-top: 6px;" id="footer-version-container">
+        <span id="footer-version-badge" style="color: var(--text-muted); cursor: default;">
+          📌 当前版本: v2.0.2
+        </span>
+      </div>
+    </footer>
+  </div>
+
+  <!-- 版本更新介绍模态框 -->
+  <div class="modal-backdrop hidden" id="release-notes-modal">
+    <div class="modal" style="max-width: 600px;">
+      <div class="modal-header">
+        <h3>🚀 版本更新说明 (v2.0.2)</h3>
+        <button class="modal-close" onclick="closeModal('release-notes-modal')">&times;</button>
+      </div>
+      <div class="modal-body" style="font-size: 13.5px; line-height: 1.7; color: #334155;">
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;">
+          <div style="font-weight: 700; color: #0f172a; font-size: 14.5px; margin-bottom: 4px;">✨ v2.0.2 重点特性概览</div>
+          <div style="color: #64748b; font-size: 12px;">发布时间：2026-09-09</div>
+        </div>
+        <ul style="padding-left: 20px; display: flex; flex-direction: column; gap: 8px;">
+          <li><b>🛡️ 三位一体防冲突引擎</b>：全面升级握手前置拦截与 Type 119/120 信令监听。当你在 PC 或手机 App 打开云电脑时，后台 10ms 内极速主动避让，绝不互踢！</li>
+          <li><b>🖥️ 单账号多云电脑支持</b>：全形态兼容个人独立机、政企桌面池（POOL）与抢占式云电脑，同一账号名下多台机器独立展现、独立电源管理与直通访问。</li>
+          <li><b>📱 官方 App 扫码免密一键登录</b>：新增天翼云官方二维码授权登录，手机天翼云 App 扫一扫秒级完成绑定，免输验证码与短信。</li>
+          <li><b>⏱️ 智能脉冲保活机制</b>：未开启挂机或今日挂机达标后，系统转入 45 分钟极简脉冲待机，99% 时间释放连接通道给官方客户端。</li>
+          <li><b>⚡ 纯协议极致轻量化</b>：彻底剔除 Chromium 重型浏览器依赖，纯 原生协议连接，镜像仅约 20MB，飞牛/绿联等各类 NAS 极速运行。</li>
+        </ul>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" onclick="closeModal('release-notes-modal')">我知道了</button>
       </div>
     </div>
   </div>
