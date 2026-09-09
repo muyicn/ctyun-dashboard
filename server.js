@@ -1370,12 +1370,26 @@ class CtYunClient {
             }, newSeconds * 1000);
           };
 
-          sessionTimeout = setTimeout(() => {
-            appendLog('Heartbeat', `[${accName}][${this.metrics.desktopName}] 周期时间到 (${keepSeconds}s)，强制重连刷新天翼云会话...`, 'info');
-            endSession('Timeout Reset');
-          }, keepSeconds * 1000);
+          if (isHangMode) {
+            // 挂机模式：常驻长连接直至达成，设置长达 3600 秒的看门狗兜底
+            const maxHangTimeout = 3600;
+            this.metrics.keepAliveSeconds = maxHangTimeout;
+            this.metrics.cycleCountdown = maxHangTimeout;
+            sessionTimeout = setTimeout(() => {
+              appendLog('Heartbeat', `[${accName}][${this.metrics.desktopName}] 挂机长连接看门狗周期到，平滑刷新会话...`, 'info');
+              endSession('Hang Watchdog');
+            }, maxHangTimeout * 1000);
+          } else {
+            // 脉冲模式：短暂连接 20 秒后主动释放通道
+            const pulseConnectSec = Math.min(60, Math.max(15, appConfig.settings?.keepAliveSeconds || 20));
+            this.metrics.keepAliveSeconds = pulseConnectSec;
+            this.metrics.cycleCountdown = pulseConnectSec;
+            sessionTimeout = setTimeout(() => {
+              appendLog('Heartbeat', `[${accName}][${this.metrics.desktopName}] 脉冲握手完成 (${pulseConnectSec}s)，释放通道待机...`, 'info');
+              endSession('Pulse Finished');
+            }, pulseConnectSec * 1000);
+          }
 
-          this.metrics.cycleCountdown = keepSeconds;
           if (this.countdownTimer) clearInterval(this.countdownTimer);
           this.countdownTimer = setInterval(() => {
             if (this.metrics.cycleCountdown > 0) {
@@ -1590,13 +1604,15 @@ class CtYunClient {
                       } else {
                         const curMin = Math.floor(curSec / 60);
                         const totMin = Math.floor(totSec / 60);
-                        this.metrics.lastHeartbeatResult = `挂机累加中: 已在线 ${curMin}/${totMin} 分钟 (${curSec}/${totSec}秒)`;
+                        const remainSec = Math.max(0, totSec - curSec);
+                        this.metrics.lastHeartbeatResult = `挂机累加中: 已在线 ${curMin}/${totMin} 分钟 (${curSec}/${totSec}秒，剩余约 ${Math.ceil(remainSec / 60)} 分钟)`;
+                        this.metrics.cycleCountdown = remainSec;
                       }
                     };
 
-                    // 连接后 2.5 秒检查一次，随后每 20 秒持续巡检
+                    // 连接后 2.5 秒检查一次，随后每 15 秒持续巡检
                     setTimeout(checkHangProgress, 2500);
-                    hangCheckInterval = setInterval(checkHangProgress, 20000);
+                    hangCheckInterval = setInterval(checkHangProgress, 15000);
                   } else {
                     // 脉冲防休眠模式：不执行挂机时长累加，握手完成后正常维持本周期即可
                     const pulseReason = todayHangDone ? '今日任务已达标' : '未开启挂机功能';

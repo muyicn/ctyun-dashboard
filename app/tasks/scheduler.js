@@ -540,20 +540,22 @@ class TaskScheduler {
 
     if (allAccountsFullyDone) {
       this.lastCompletedDate = todayStr;
-      this.appendLog('Scheduler', `🎉 今日云电脑定时任务流程已全部顺利执行完成！做完即标记今日达成，当天绝不再空转。`, 'success');
+      this.appendLog('Scheduler', `🎉 今日云电脑全部自动化任务已圆满达成！做完即标记今日达成，当天绝不再空转。`, 'success');
+      const detailText = summaryResults.map(r => `• ${r.name}: 打卡[${r.sign ? 'OK' : '跳过'}], AI对话[${r.aiChat ? 'OK' : '跳过'}], 挂机1小时[${r.hang ? '已满1小时' : '已达成'}]`).join('\n');
+      this.sendNotification(
+        this.getSettings(),
+        `🎉 天翼云电脑今日任务圆满达成 (${todayStr})`,
+        `今日自动化任务已全部达成：\n${detailText}\n所有任务均为原生协议极速直连，零 Chromium 内存占用！`
+      );
     } else {
-      this.appendLog('Scheduler', `⚡ 今日定时自动化流程触发完毕，云电脑长连接正在后台持续挂机累加时长直至满 1 小时达成...`, 'info');
+      this.appendLog('Scheduler', `⚡ 今日打卡与AI对话已就绪，长连接正在后台持续挂机累加时长直至满 1 小时达成...`, 'info');
+      const detailText = summaryResults.map(r => `• ${r.name}: 打卡[${r.sign ? 'OK' : '跳过'}], AI对话[${r.aiChat ? 'OK' : '跳过'}], 挂机1小时[${r.hang ? '已达标' : '后台挂机累加中'}]`).join('\n');
+      this.sendNotification(
+        this.getSettings(),
+        `⚡ 天翼云电脑定时任务已触发 (${todayStr})`,
+        `打卡与AI对话已完成，长连接正在后台持续挂机中：\n${detailText}`
+      );
     }
-
-    if (this.saveConfig) this.saveConfig();
-    
-    // 发送 Webhook 汇总通知
-    const detailText = summaryResults.map(r => `• ${r.name}: 打卡[${r.sign ? 'OK' : '跳过'}], AI对话[${r.aiChat ? 'OK' : '跳过'}], 挂机保活[${r.hang ? 'OK' : '跳过'}]`).join('\n');
-    this.sendNotification(
-      this.getSettings(),
-      `🌟 天翼云电脑今日任务执行汇总 (${todayStr})`,
-      `今日自动化任务已准点完成：\n${detailText}\n所有任务均为原生协议极速直连，零 Chromium 内存占用！`
-    );
 
     this.isRunning = false;
   }

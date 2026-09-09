@@ -465,7 +465,7 @@ function renderAccounts() {
       <div style="background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; font-size: 12px;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
           <span style="color: #2563eb; font-weight: 700;">📡 状态与心跳监视</span>
-          <span style="color: var(--text-muted);">周期: <b>${m.keepAliveSeconds || 60}s</b> (倒计时: <b style="color: #16a34a;">${m.cycleCountdown || 60}s</b>)</span>
+          <span style="color: var(--text-muted);">${f.cloudHang && !(m.officialTasks?.find(t => t.name.includes('使用1小时'))?.status === 2) ? `模式: <b style="color:#d97706;">持续挂机累加</b> (剩余: <b style="color:#2563eb;">${m.cycleCountdown || 0}s</b>)` : `脉冲间隔: <b>${acc.pulseIntervalSeconds || 30}s</b> (脉冲倒计时: <b style="color:#16a34a;">${m.cycleCountdown || 30}s</b>)`}</span>
         </div>
         <div style="color: #475569; line-height: 1.8;">
           <div style="display: flex; align-items: baseline; gap: 4px; overflow: hidden; white-space: nowrap;">
