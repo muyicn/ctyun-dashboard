@@ -1208,50 +1208,291 @@ input:checked + .slider:before {
   to { transform: translateX(0); opacity: 1; }
 }
 
-/* 响应式设计 (完美自适应手机端) */
+/* 响应式设计 (深度适配手机端与全尺寸移动设备) */
 @media (max-width: 768px) {
   body {
-    padding: 12px;
+    padding: 10px;
   }
   
   header {
     flex-direction: column;
     align-items: stretch;
-    gap: 14px;
-    padding: 14px;
+    gap: 12px;
+    padding: 12px 14px;
+    margin-bottom: 14px;
+    border-radius: var(--radius);
+  }
+
+  .logo-group {
+    gap: 10px;
+  }
+
+  .logo-icon {
+    width: 38px;
+    height: 38px;
+    font-size: 20px;
+    flex-shrink: 0;
+  }
+
+  .title-group h1 {
+    font-size: 15.5px;
+    gap: 6px;
+  }
+
+  .title-group p {
+    font-size: 11px;
+    line-height: 1.4;
+    margin-top: 1px;
   }
   
   .header-actions {
+    width: 100%;
+    display: flex;
     justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+
+  #logged-actions-group {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+
+  #logged-actions-group .btn {
+    padding: 6px 10px;
+    font-size: 12px;
   }
   
   .stats-grid {
     grid-template-columns: 1fr 1fr;
-    gap: 10px;
+    gap: 8px;
+    margin-bottom: 14px;
   }
   
   .stat-card {
-    padding: 14px;
+    padding: 11px 12px;
     gap: 10px;
+    border-radius: var(--radius);
   }
   
   .stat-icon {
-    width: 40px;
-    height: 40px;
-    font-size: 18px;
+    width: 36px;
+    height: 36px;
+    font-size: 17px;
+    flex-shrink: 0;
   }
   
   .stat-info .stat-value {
-    font-size: 20px;
+    font-size: 19px;
+  }
+
+  .stat-info .stat-label {
+    font-size: 11px;
+  }
+
+  .section-header {
+    margin-top: 14px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: space-between;
+  }
+
+  .section-title {
+    font-size: 14px;
+    gap: 6px;
+  }
+
+  .section-title span {
+    font-size: 16px;
+  }
+
+  #account-view-tabs-group {
+    gap: 2px;
+    padding: 2px;
+  }
+
+  #account-view-tabs-group .btn-sm {
+    padding: 4px 7px;
+    font-size: 11px;
+  }
+
+  .btn-refresh {
+    padding: 4px 8px;
+    font-size: 11px;
   }
   
   .accounts-grid {
     grid-template-columns: 1fr;
-    gap: 14px;
+    gap: 12px;
+    margin-bottom: 18px;
   }
-  
+
+  .account-card {
+    padding: 14px;
+    gap: 10px;
+    border-radius: var(--radius);
+  }
+
+  .account-avatar {
+    width: 38px;
+    height: 38px;
+    font-size: 14px;
+  }
+
+  .account-name-text {
+    font-size: 13.5px;
+  }
+
+  .inline-name-input {
+    width: 120px;
+    font-size: 13px;
+  }
+
+  .card-action-tools {
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 6px;
+  }
+
+  .btn-tool {
+    padding: 6px 3px;
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .card-actions {
+    padding-top: 10px;
+    gap: 8px;
+  }
+
+  /* 模态框手机自适应优化 */
+  .modal-backdrop {
+    padding: 10px;
+  }
+
+  .modal {
+    width: 100%;
+    max-width: 100%;
+    max-height: 92vh;
+    border-radius: var(--radius-lg);
+  }
+
+  .modal-header {
+    padding: 12px 16px;
+  }
+
+  .modal-header h3 {
+    font-size: 14.5px;
+  }
+
+  .modal-body {
+    padding: 14px;
+    gap: 12px;
+  }
+
+  .modal-footer {
+    padding: 10px 14px;
+    gap: 8px;
+  }
+
+  .modal-footer .btn {
+    flex: 1;
+    justify-content: center;
+    padding: 8px 12px;
+    font-size: 12.5px;
+  }
+
+  /* 日志控制台手机优化 */
+  .log-panel {
+    margin-top: 16px;
+    border-radius: var(--radius);
+  }
+
+  .log-header {
+    padding: 8px 12px;
+    gap: 6px;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .log-header-left {
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
   .log-content {
-    height: 280px;
-    font-size: 11.5px;
+    height: 240px;
+    padding: 10px 12px;
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  /* 手机端 Toast 居中提示 */
+  #toast-container {
+    top: 10px;
+    left: 10px;
+    right: 10px;
+    max-width: calc(100% - 20px);
+    align-items: center;
+  }
+
+  .toast {
+    max-width: 100%;
+    width: 100%;
+    font-size: 12px;
+    padding: 8px 12px;
+    justify-content: center;
+    text-align: center;
+  }
+
+  /* 下拉菜单手机防溢出 */
+  .dropdown-menu {
+    max-width: 240px;
+    right: 0;
+  }
+}
+
+/* 超窄屏手机进一步微调 (iPhone SE / 375px 以下) */
+@media (max-width: 480px) {
+  .title-group h1 {
+    font-size: 14px;
+  }
+
+  .title-group p {
+    font-size: 10.5px;
+  }
+
+  .card-action-tools {
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+
+  .card-action-tools button:last-child {
+    grid-column: span 2;
+  }
+
+  .stats-grid {
+    gap: 6px;
+  }
+
+  .stat-card {
+    padding: 10px;
+  }
+
+  .stat-icon {
+    width: 32px;
+    height: 32px;
+    font-size: 15px;
+  }
+
+  .stat-info .stat-value {
+    font-size: 17px;
   }
 }
