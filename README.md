@@ -5,6 +5,8 @@
 > ✨ **v2.1 重大更新**：全量融合中国移动云电脑（SOHO REST 签名加密 + ZTEC CAG TCP 三阶段握手 + SC/ZTE 自适应开机），双云同台统一管理与统一配额。
 
 ---
+![控制台总览](https://github.com/user-attachments/assets/1cea9bcb-b06c-4845-8940-74565a3aa88c)
+
 
 ## 🌟 核心功能与技术特性
 
