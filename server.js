@@ -2844,7 +2844,28 @@ function rewardNeedsDesktop(prodId, prodType) {
     return;
   }
 
-  // 7.5 移动云测试登录并拉取云电脑列表 API
+  // 7.5 移动云图形验证码获取 API
+  if (req.method === 'GET' && pathname === '/api/ydpc/captcha') {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请先登录' }, 401);
+      return;
+    }
+    try {
+      const soho = new SohoClient({});
+      const vcodeData = await soho.getVerificationCode();
+      jsonResponse(res, {
+        success: true,
+        image: vcodeData.image,
+        randomCode: vcodeData.randomCode
+      });
+    } catch (e) {
+      jsonResponse(res, { error: e.message || '获取移动云验证码失败' }, 500);
+    }
+    return;
+  }
+
+  // 7.6 移动云测试登录并拉取云电脑列表 API
   if (req.method === 'POST' && pathname === '/api/ydpc/test-login') {
     const session = getSessionFromReq(req);
     if (!session) {
@@ -2855,6 +2876,8 @@ function rewardNeedsDesktop(prodId, prodType) {
     const user = (body.user || '').trim();
     const pwd = (body.password || '').trim();
     const accountType = body.accountType || 'main';
+    const verificationCode = (body.verificationCode || '').trim();
+    const randomCode = (body.randomCode || '').trim();
 
     if (!user || !pwd) {
       jsonResponse(res, { error: '手机号/账号与密码不能为空' }, 400);
@@ -2863,7 +2886,7 @@ function rewardNeedsDesktop(prodId, prodType) {
 
     try {
       const soho = new SohoClient({ accountType });
-      const loginData = await soho.login(user, pwd, accountType);
+      const loginData = await soho.login(user, pwd, accountType, verificationCode, randomCode);
       const vms = await soho.listCloudPcs();
       jsonResponse(res, {
         success: true,
@@ -2877,7 +2900,7 @@ function rewardNeedsDesktop(prodId, prodType) {
     return;
   }
 
-  // 7.6 添加移动云电脑账号 API
+  // 7.7 添加移动云电脑账号 API
   if (req.method === 'POST' && pathname === '/api/accounts/ydpc/add') {
     const session = getSessionFromReq(req);
     if (!session) {
@@ -2905,6 +2928,8 @@ function rewardNeedsDesktop(prodId, prodType) {
     const accountType = body.accountType || 'main';
     const autoBoot = body.autoBoot !== false;
     const keepaliveInterval = parseInt(body.keepaliveInterval) || 600;
+    const verificationCode = (body.verificationCode || '').trim();
+    const randomCode = (body.randomCode || '').trim();
 
     if (!user || !pwd) {
       jsonResponse(res, { error: '账号和密码不能为空' }, 400);
@@ -2918,7 +2943,7 @@ function rewardNeedsDesktop(prodId, prodType) {
 
     try {
       const soho = new SohoClient({ accountType });
-      await soho.login(user, pwd, accountType);
+      await soho.login(user, pwd, accountType, verificationCode, randomCode);
       const vms = await soho.listCloudPcs();
 
       const newAcc = {
@@ -3315,6 +3340,7 @@ function rewardNeedsDesktop(prodId, prodType) {
     const qrCodeId = parsedUrl.searchParams.get('qrCodeId');
     const deviceCode = parsedUrl.searchParams.get('deviceCode') || generateDeviceCode();
     const accountName = (parsedUrl.searchParams.get('accountName') || '').trim();
+    const targetAccId = parsedUrl.searchParams.get('accId');
 
     if (!qrCodeId) {
       jsonResponse(res, { error: '缺少 qrCodeId 参数' }, 400);
@@ -3329,11 +3355,58 @@ function rewardNeedsDesktop(prodId, prodType) {
         const loginData = await tempClient.loginByToken(statusRes.loginToken);
         const userPhone = loginData.mobilephone || loginData.userName || '已扫码账号';
         const finalName = accountName || `天翼账号_${userPhone.slice(-4)}`;
-
         const currentOwnerId = session.userId;
-        const id = crypto.randomUUID().substring(0, 8);
+
+        // 检查是否为已有账号重新扫码授权 (通过 accId 指定或同用户同手机号)
+        let existingAcc = null;
+        if (targetAccId) {
+          existingAcc = appConfig.accounts.find(a => a.id === targetAccId && a.ownerId === currentOwnerId);
+        }
+        if (!existingAcc) {
+          existingAcc = appConfig.accounts.find(a => (a.user === userPhone || a.user === userPhone.replace(/(\d{3})\d{4}(\d{4})/, '$1****$2')) && a.ownerId === currentOwnerId && a.platform !== 'ydpc');
+        }
+
+        if (existingAcc) {
+          existingAcc.user = userPhone;
+          existingAcc.deviceCode = deviceCode;
+          existingAcc.savedLoginInfo = loginData;
+          existingAcc.sessionExpired = false;
+          existingAcc.bound = true;
+          if (accountName) existingAcc.name = accountName;
+          saveConfig(appConfig);
+
+          const client = getClient(existingAcc);
+          client.loginInfo = loginData;
+          client.account.sessionExpired = false;
+          client.startKeepAliveWorker();
+
+          appendLog('Auth', `[${existingAcc.name}] 🎉 官方扫码重新授权成功！已恢复在线保活。`, 'success', existingAcc.name, 'ctyun');
+          jsonResponse(res, {
+            success: true,
+            codeStatus: 'authorize',
+            account: existingAcc,
+            isReAuth: true
+          });
+          return;
+        }
+
+        // 新建账号前检查普通用户配额
+        const currentUser = authManager.getUserById(currentOwnerId);
+        if (currentUser && currentUser.role !== 'admin') {
+          const currentOwned = appConfig.accounts.filter(a => a.ownerId === currentOwnerId).length;
+          const userMax = currentUser.maxQuota || 2;
+          if (currentOwned >= userMax) {
+            jsonResponse(res, {
+              error: `已达到云电脑添加配额上限（当前配额: ${userMax}台），无法继续添加！请联系管理员提高配额。`
+            }, 400);
+            return;
+          }
+        }
+
+        const id = 'ct_' + crypto.randomUUID().substring(0, 8);
         const newAcc = {
           id,
+          platform: 'ctyun',
           ownerId: currentOwnerId,
           name: finalName,
           user: userPhone,
@@ -4275,20 +4348,26 @@ function rewardNeedsDesktop(prodId, prodType) {
     }
 
     const exportData = {
-      exportVersion: '1.0.0',
+      exportVersion: '2.1.0',
       exportTime: getBeijingTimeString(),
       exportedBy: session.username,
       role: session.role,
       settings: session.role === 'admin' ? appConfig.settings : undefined,
       accounts: exportAccounts.map(a => ({
+        platform: a.platform || 'ctyun',
+        accountType: a.accountType,
         name: a.name,
         user: a.user,
-        password: a.password,
+        password: a.password || '',
         deviceCode: a.deviceCode,
+        keepaliveInterval: a.keepaliveInterval,
         displayConfig: a.displayConfig,
         enabled: a.enabled,
+        bound: a.bound,
         features: a.features,
-        redeemConfig: a.redeemConfig
+        redeemConfig: a.redeemConfig,
+        vms: a.vms,
+        desktops: a.desktops
       }))
     };
 
@@ -4345,39 +4424,55 @@ function rewardNeedsDesktop(prodId, prodType) {
 
     let importedCount = 0;
     for (const item of importAccounts) {
-      if (!item.user || !item.password) continue;
+      if (!item.user) continue;
+
+      const isYdpc = item.platform === 'ydpc' || item.accountType === 'sub' || (Array.isArray(item.vms) && item.vms.length > 0);
+      const isQrAccount = !item.password && !isYdpc;
 
       // 如果是 merge，检查手机号是否已存在
-      const existing = appConfig.accounts.find(a => a.user === item.user && a.ownerId === targetOwnerId);
+      const existing = appConfig.accounts.find(a => a.user === item.user && a.ownerId === targetOwnerId && (a.platform || 'ctyun') === (isYdpc ? 'ydpc' : 'ctyun'));
       if (existing) {
         existing.name = item.name || existing.name;
-        existing.password = item.password;
+        if (item.password) existing.password = item.password;
+        if (item.accountType) existing.accountType = item.accountType;
+        if (item.keepaliveInterval) existing.keepaliveInterval = item.keepaliveInterval;
         if (item.deviceCode) existing.deviceCode = item.deviceCode;
         if (item.displayConfig) existing.displayConfig = { ...existing.displayConfig, ...item.displayConfig };
         if (item.features) existing.features = { ...existing.features, ...item.features };
         if (item.redeemConfig) existing.redeemConfig = { ...existing.redeemConfig, ...item.redeemConfig };
+        if (item.vms && item.vms.length > 0) existing.vms = item.vms;
+        if (item.desktops && item.desktops.length > 0) existing.desktops = item.desktops;
         importedCount++;
         continue;
       }
 
-      const id = crypto.randomUUID().substring(0, 8);
+      const id = (isYdpc ? 'yd_' : 'ct_') + crypto.randomUUID().substring(0, 8);
       const newAcc = {
         id,
+        platform: isYdpc ? 'ydpc' : 'ctyun',
         ownerId: targetOwnerId,
+        accountType: item.accountType || (isYdpc ? 'main' : undefined),
         name: item.name || item.user,
         user: item.user,
-        password: item.password,
+        password: item.password || '',
         deviceCode: item.deviceCode || generateDeviceCode(),
+        keepaliveInterval: parseInt(item.keepaliveInterval) || 600,
         displayConfig: item.displayConfig || { width: 2560, height: 1440, scale: 150 },
         enabled: item.enabled !== false,
-        bound: true,
-        features: item.features || {
+        bound: isYdpc ? true : (item.bound !== false),
+        sessionExpired: isQrAccount ? true : false,
+        features: item.features || (isYdpc ? {
+          keepAlive: true,
+          cagKeepAlive: true,
+          sohoHeartbeat: true,
+          autoBoot: true
+        } : {
           keepAlive: true,
           autoSign: true,
           aiChat: true,
-          cloudHang: true,
+          cloudHang: false,
           autoRedeem: false
-        },
+        }),
         redeemConfig: item.redeemConfig || {
           enabled: false,
           targetType: 'redeem',
@@ -4393,13 +4488,15 @@ function rewardNeedsDesktop(prodId, prodType) {
           intervalDays: 1,
           lastRedeemDate: ''
         },
-        stats: {
+        vms: item.vms || [],
+        desktops: item.desktops || [],
+        stats: item.stats || {
           lastSignTime: '',
           lastAiChatTime: '',
           lastHangTime: '',
           hangMinutesToday: 0,
           points: 0,
-          keepAliveStatus: 'online',
+          keepAliveStatus: isYdpc ? 'online' : 'offline',
           lastError: ''
         }
       };
@@ -4408,7 +4505,13 @@ function rewardNeedsDesktop(prodId, prodType) {
 
       // 自动唤醒长连接保活
       const client = getClient(newAcc);
-      if (newAcc.features?.keepAlive === true) {
+      if (isYdpc) {
+        client.refreshVms().then(() => {
+          if (newAcc.enabled && newAcc.features?.keepAlive !== false) {
+            client.startKeepAliveWorker();
+          }
+        }).catch(() => {});
+      } else if (newAcc.password && newAcc.enabled && newAcc.features?.keepAlive !== false) {
         client.startKeepAliveWorker();
       }
     }

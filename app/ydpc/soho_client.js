@@ -236,7 +236,20 @@ class SohoClient {
     return `-----BEGIN PUBLIC KEY-----\n${res.data}\n-----END PUBLIC KEY-----`;
   }
 
-  async login(username, password, accountType = 'main') {
+  // 获取移动云官方图形验证码 (用于安全风控时输入)
+  async getVerificationCode() {
+    await this.bootstrapPublicKey();
+    const res = await this.fetchApi('/login/verificationCode/v1', {});
+    if (res.code === 2000 && res.data) {
+      return {
+        image: res.data.verificationCode, // Base64 data URI (data:image/png;base64,...)
+        randomCode: res.data.randomCode || ''
+      };
+    }
+    throw new Error(res.msg || '获取移动云验证码失败');
+  }
+
+  async login(username, password, accountType = 'main', verificationCode = '', randomCode = '') {
     this.savedUsername = username;
     this.savedPassword = password;
     this.accountType = accountType;
@@ -249,8 +262,8 @@ class SohoClient {
       const subRes = await this.fetchApi('/login/home/namePwdLogin/v1', {
         subAccount: username,
         password: encPwd,
-        verificationCode: '',
-        randomCode: ''
+        verificationCode: String(verificationCode || ''),
+        randomCode: String(randomCode || '')
       });
       if (subRes.code === 2000 && subRes.data) {
         this.userId = String(subRes.data.userId);
@@ -261,12 +274,12 @@ class SohoClient {
       throw new Error(subRes.msg || `子账号登录失败 (code ${subRes.code})`);
     }
 
-    // 2. 主账号模式：先尝试主账号接口，若失败自动智能回退尝试子账号接口
+    // 2. 主账号模式：先尝试主账号接口，若失败且非验证码错误，自动智能回退尝试子账号接口
     const mainRes = await this.fetchApi('/login/namePwdLogin/v1', {
       username,
       password: encPwd,
-      verificationCode: '',
-      randomCode: ''
+      verificationCode: String(verificationCode || ''),
+      randomCode: String(randomCode || '')
     });
 
     if (mainRes.code === 2000 && mainRes.data) {
@@ -276,21 +289,24 @@ class SohoClient {
       return { success: true, userId: this.userId, sohoToken: this.sohoToken, accountType: 'main', raw: mainRes.data };
     }
 
-    // 智能回退尝试子账号
-    try {
-      const subFallback = await this.fetchApi('/login/home/namePwdLogin/v1', {
-        subAccount: username,
-        password: encPwd,
-        verificationCode: '',
-        randomCode: ''
-      });
-      if (subFallback.code === 2000 && subFallback.data) {
-        this.userId = String(subFallback.data.userId);
-        this.sohoToken = subFallback.data.sohoToken;
-        this.accountType = 'sub';
-        return { success: true, userId: this.userId, sohoToken: this.sohoToken, accountType: 'sub', raw: subFallback.data };
-      }
-    } catch (e) {}
+    // 若非验证码相关错误，才尝试子账号回退（若提示验证码，必须让用户输入验证码）
+    const isCaptchaErr = String(mainRes.msg || '').includes('验证码');
+    if (!isCaptchaErr) {
+      try {
+        const subFallback = await this.fetchApi('/login/home/namePwdLogin/v1', {
+          subAccount: username,
+          password: encPwd,
+          verificationCode: String(verificationCode || ''),
+          randomCode: String(randomCode || '')
+        });
+        if (subFallback.code === 2000 && subFallback.data) {
+          this.userId = String(subFallback.data.userId);
+          this.sohoToken = subFallback.data.sohoToken;
+          this.accountType = 'sub';
+          return { success: true, userId: this.userId, sohoToken: this.sohoToken, accountType: 'sub', raw: subFallback.data };
+        }
+      } catch (e) {}
+    }
 
     throw new Error(mainRes.msg || `移动云登录失败 (code ${mainRes.code})`);
   }

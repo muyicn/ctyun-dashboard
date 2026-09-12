@@ -629,7 +629,7 @@ function buildAccountCardElement(acc, slotIndex) {
   // ====================================================
   let sessionBadge = '';
   if (acc.sessionExpired) {
-    sessionBadge = `<span class="badge badge-danger" style="cursor:pointer;" onclick="editAccount('${acc.id}')">⚠️ 会话失效</span>`;
+    sessionBadge = `<span class="badge badge-danger" style="cursor:pointer;" onclick="editAccount('${acc.id}')">${!acc.password ? '⚠️ 待扫码授权' : '⚠️ 会话失效'}</span>`;
   }
 
   const boundBadgeHtml = acc.bound
@@ -818,8 +818,8 @@ function buildAccountCardElement(acc, slotIndex) {
     <div class="card-actions">
       ${acc.sessionExpired ? `
         <button class="btn btn-danger btn-launch-full" onclick="editAccount('${acc.id}')" style="margin-bottom:6px;">
-          <span>🔑 重新验证登录</span>
-          <span class="btn-subtext">输验证码恢复 ➔</span>
+          <span>${!acc.password ? '📱 重新扫码授权' : '🔑 重新验证登录'}</span>
+          <span class="btn-subtext">${!acc.password ? '手机 App 扫码一键恢复 ➔' : '输验证码恢复 ➔'}</span>
         </button>
       ` : ''}
       <div class="card-action-tools">
@@ -1329,18 +1329,20 @@ async function loadQrCodeForModal() {
         };
       }
 
-      // 启动 2 秒轮询看门狗 (携带用户填写的账号备注名，授权成功后直接以此命名)
+      // 启动 2 秒轮询看门狗 (携带用户填写的账号备注名与目标重登账号ID)
       const nameVal = document.getElementById("qrcode-acc-name") ? document.getElementById("qrcode-acc-name").value.trim() : "";
+      const currentAccId = document.getElementById("acc-id") ? document.getElementById("acc-id").value : "";
+      const accIdParam = currentAccId ? `&accId=${encodeURIComponent(currentAccId)}` : "";
       qrPollingTimer = setInterval(async () => {
         try {
-          const sRes = await authFetch(`/api/account/qrcode/status?qrCodeId=${encodeURIComponent(currentQrCodeId)}&deviceCode=${encodeURIComponent(data.deviceCode)}&accountName=${encodeURIComponent(nameVal)}`);
+          const sRes = await authFetch(`/api/account/qrcode/status?qrCodeId=${encodeURIComponent(currentQrCodeId)}&deviceCode=${encodeURIComponent(data.deviceCode)}&accountName=${encodeURIComponent(nameVal)}${accIdParam}`);
           const sData = await sRes.json();
           if (sData.success) {
             if (sData.codeStatus === 'scaned') {
               if (hintEl) { hintEl.innerText = "📱 手机端已扫描，请在手机上点击【确认登录】..."; hintEl.style.color = "#16a34a"; }
             } else if (sData.codeStatus === 'authorize') {
               if (qrPollingTimer) { clearInterval(qrPollingTimer); qrPollingTimer = null; }
-              showToast("🎉 官方扫码授权成功！云电脑已上线！", "success");
+              showToast(sData.isReAuth ? "🎉 官方扫码重新授权成功！已恢复在线保活！" : "🎉 官方扫码授权成功！云电脑已上线！", "success");
               closeModal("account-modal");
               loadAccounts();
             } else if (sData.codeStatus === 'expire') {
@@ -1378,12 +1380,52 @@ function openAddAccountModal() {
   if (ydUserEl) ydUserEl.value = "";
   const ydPwdEl = document.getElementById("ydpc-password");
   if (ydPwdEl) ydPwdEl.value = "";
+  const ydCaptchaCode = document.getElementById("ydpc-captcha-code");
+  if (ydCaptchaCode) ydCaptchaCode.value = "";
+  const ydRandomCode = document.getElementById("ydpc-random-code");
+  if (ydRandomCode) ydRandomCode.value = "";
+  const ydImg = document.getElementById("ydpc-captcha-img");
+  if (ydImg) ydImg.style.display = "none";
+  const ydLoading = document.getElementById("ydpc-captcha-loading");
+  if (ydLoading) {
+    ydLoading.style.display = "inline";
+    ydLoading.innerText = "点击获取验证码";
+  }
 
   const platformTabs = document.getElementById("platform-tabs-container");
   if (platformTabs) platformTabs.style.display = "flex";
 
   openModal("account-modal");
   switchAddAccountPlatform('ctyun');
+}
+
+async function refreshYdpcModalCaptcha() {
+  const imgEl = document.getElementById("ydpc-captcha-img");
+  const loadingEl = document.getElementById("ydpc-captcha-loading");
+  const randomCodeEl = document.getElementById("ydpc-random-code");
+
+  if (loadingEl) {
+    loadingEl.style.display = "inline";
+    loadingEl.innerText = "获取中...";
+  }
+  if (imgEl) imgEl.style.display = "none";
+
+  try {
+    const res = await authFetch('/api/ydpc/captcha');
+    const data = await res.json();
+    if (res.ok && data.success && data.image) {
+      if (randomCodeEl) randomCodeEl.value = data.randomCode || '';
+      if (imgEl) {
+        imgEl.src = data.image;
+        imgEl.style.display = "block";
+      }
+      if (loadingEl) loadingEl.style.display = "none";
+    } else {
+      if (loadingEl) loadingEl.innerText = "获取失败，点击重试";
+    }
+  } catch (e) {
+    if (loadingEl) loadingEl.innerText = "获取失败，点击重试";
+  }
 }
 
 function switchAddAccountPlatform(platform) {
@@ -1424,6 +1466,8 @@ async function saveYdpcAccount() {
   const accountType = document.getElementById("ydpc-account-type") ? document.getElementById("ydpc-account-type").value : "main";
   const keepaliveInterval = document.getElementById("ydpc-interval") ? parseInt(document.getElementById("ydpc-interval").value) || 600 : 600;
   const autoBoot = document.getElementById("ydpc-autoboot") ? document.getElementById("ydpc-autoboot").checked : true;
+  const verificationCode = document.getElementById("ydpc-captcha-code") ? document.getElementById("ydpc-captcha-code").value.trim() : "";
+  const randomCode = document.getElementById("ydpc-random-code") ? document.getElementById("ydpc-random-code").value.trim() : "";
 
   if (!user || !password) {
     showToast("请输入移动云手机号和密码", "error");
@@ -1466,7 +1510,7 @@ async function saveYdpcAccount() {
     const res = await authFetch("/api/accounts/ydpc/add", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, user, password, accountType, keepaliveInterval, autoBoot })
+      body: JSON.stringify({ name, user, password, accountType, keepaliveInterval, autoBoot, verificationCode, randomCode })
     });
     const data = await res.json();
     if (res.ok && data.success) {
@@ -1474,7 +1518,17 @@ async function saveYdpcAccount() {
       closeModal("account-modal");
       await loadAccounts(true);
     } else {
-      showToast(data.error || "添加移动云电脑失败", "error");
+      const errMsg = data.error || "添加移动云电脑失败";
+      showToast(errMsg, "error");
+      if (errMsg.includes("验证码")) {
+        // 自动拉取图形验证码并聚焦
+        refreshYdpcModalCaptcha();
+        const codeInput = document.getElementById("ydpc-captcha-code");
+        if (codeInput) {
+          codeInput.focus();
+          codeInput.select();
+        }
+      }
     }
   } catch (e) {
     showToast("网络请求异常: " + e.message, "error");
@@ -1508,18 +1562,34 @@ function editAccount(accId) {
     openModal("account-modal");
     switchAddAccountPlatform('ydpc');
   } else {
-    document.getElementById("modal-account-title").innerText = acc.sessionExpired ? "⚠️ 重新验证天翼云账号" : "编辑天翼云账号";
-    document.getElementById("acc-name").value = acc.name || "";
-    document.getElementById("acc-user").value = acc.user || "";
-    document.getElementById("acc-password").value = acc.password || "";
-    document.getElementById("acc-captcha-code").value = "";
-    document.getElementById("acc-device-code").value = acc.deviceCode || "";
-    const tabContainer = document.getElementById("acc-login-tabs");
-    if (tabContainer) tabContainer.style.display = "none";
-    openModal("account-modal");
-    switchAddAccountPlatform('ctyun');
-    switchAccountLoginTab('pwd');
-    setTimeout(refreshModalCaptcha, 300);
+    const isQrAccount = !acc.password;
+    if (isQrAccount) {
+      document.getElementById("modal-account-title").innerText = acc.sessionExpired 
+        ? `📱 重新扫码授权天翼云账号 [${acc.name || acc.user}]` 
+        : `📱 重新扫码授权 [${acc.name || acc.user}]`;
+      const qrNameEl = document.getElementById("qrcode-acc-name");
+      if (qrNameEl) qrNameEl.value = acc.name || "";
+      const tabContainer = document.getElementById("acc-login-tabs");
+      if (tabContainer) tabContainer.style.display = "none";
+      openModal("account-modal");
+      switchAddAccountPlatform('ctyun');
+      switchAccountLoginTab('qrcode');
+    } else {
+      document.getElementById("modal-account-title").innerText = acc.sessionExpired 
+        ? `⚠️ 重新验证天翼云账号 [${acc.name || acc.user}]` 
+        : `编辑天翼云账号 [${acc.name || acc.user}]`;
+      document.getElementById("acc-name").value = acc.name || "";
+      document.getElementById("acc-user").value = acc.user || "";
+      document.getElementById("acc-password").value = acc.password || "";
+      document.getElementById("acc-captcha-code").value = "";
+      document.getElementById("acc-device-code").value = acc.deviceCode || "";
+      const tabContainer = document.getElementById("acc-login-tabs");
+      if (tabContainer) tabContainer.style.display = "none";
+      openModal("account-modal");
+      switchAddAccountPlatform('ctyun');
+      switchAccountLoginTab('pwd');
+      setTimeout(refreshModalCaptcha, 300);
+    }
   }
 }
 
@@ -2595,7 +2665,7 @@ async function saveUserNotify() {
   }
 }
 
-// 9. 实时控制台日志与分类过滤 (双维过滤：平台筛选 + 业务事件)
+// 9. 实时控制台日志与分类过滤 (双维绝对隔离：平台筛选 + 业务事件)
 function switchPlatformFilter(platform) {
   activePlatformFilter = platform;
   const pAll = document.getElementById('tab-platform-all');
@@ -2618,26 +2688,45 @@ function switchLogFilter(filterType) {
   renderFilteredLogs();
 }
 
+// 统一日志可见性判定引擎 (双维过滤：平台隔离 + 业务类型)
+function shouldDisplayLogItem(item) {
+  if (!item) return false;
+
+  // 1. 平台维度绝对隔离
+  const isSystemOrAuth = item.source === 'System' || item.source === 'Auth' || item.source === 'Admin' || item.source === 'Notify';
+  if (!isSystemOrAuth) {
+    if (activePlatformFilter === 'ctyun' && item.platform !== 'ctyun') return false;
+    if (activePlatformFilter === 'ydpc' && item.platform !== 'ydpc') return false;
+  }
+
+  // 2. 业务事件维度过滤 (心跳/长连保活 vs 业务任务)
+  const isHeartbeat = item.source === 'Heartbeat' || item.source === 'CAG' || item.source === 'KeepAlive' || item.source === 'SOHO';
+  if (activeLogFilter === 'heartbeat' && !isHeartbeat) return false;
+  if (activeLogFilter === 'tasks' && isHeartbeat) return false;
+  return true;
+}
+
+function createLogLineElement(item) {
+  const line = document.createElement("div");
+  line.className = `log-line log-level-${item.level || 'info'}`;
+  if (item.id) line.dataset.logId = item.id;
+  const repeatBadge = (item.repeatCount && item.repeatCount > 1) 
+    ? `<span class="badge-repeat">x${item.repeatCount}</span>` 
+    : '';
+  line.innerHTML = `
+    <span class="log-time">[${item.timestamp}]</span>
+    <span class="log-source">[${item.source}]</span>
+    <span class="log-text">${escapeHtml(item.message)}</span>${repeatBadge}
+  `;
+  return line;
+}
+
 function renderFilteredLogs() {
   const logBox = document.getElementById("log-content");
   if (!logBox) return;
   logBox.innerHTML = "";
 
-  const filtered = allReceivedLogs.filter(item => {
-    // 1. 平台维度过滤
-    const isSystemOrAuth = item.source === 'System' || item.source === 'Auth' || item.source === 'Admin' || item.source === 'Notify';
-    if (!isSystemOrAuth) {
-      if (activePlatformFilter === 'ctyun' && item.platform !== 'ctyun') return false;
-      if (activePlatformFilter === 'ydpc' && item.platform !== 'ydpc') return false;
-    }
-
-    // 2. 业务事件维度过滤
-    const isHeartbeat = item.source === 'Heartbeat' || item.source === 'CAG' || item.source === 'KeepAlive' || item.source === 'SOHO';
-    if (activeLogFilter === 'all') return true;
-    if (activeLogFilter === 'heartbeat') return isHeartbeat;
-    if (activeLogFilter === 'tasks') return !isHeartbeat;
-    return true;
-  });
+  const filtered = allReceivedLogs.filter(shouldDisplayLogItem);
 
   if (filtered.length === 0) {
     logBox.innerHTML = `<div class="log-line" style="color: #64748b; padding: 12px 0; text-align: center;">[暂无此类日志]</div>`;
@@ -2645,18 +2734,7 @@ function renderFilteredLogs() {
   }
 
   filtered.forEach(item => {
-    const line = document.createElement("div");
-    line.className = `log-line log-level-${item.level || 'info'}`;
-    if (item.id) line.dataset.logId = item.id;
-    const repeatBadge = (item.repeatCount && item.repeatCount > 1) 
-      ? `<span class="badge-repeat">x${item.repeatCount}</span>` 
-      : '';
-    line.innerHTML = `
-      <span class="log-time">[${item.timestamp}]</span>
-      <span class="log-source">[${item.source}]</span>
-      <span class="log-text">${escapeHtml(item.message)}</span>${repeatBadge}
-    `;
-    logBox.appendChild(line);
+    logBox.appendChild(createLogLineElement(item));
   });
 
   if (autoScroll) logBox.scrollTop = logBox.scrollHeight;
@@ -2689,6 +2767,7 @@ async function initLogStream() {
   eventSource.onmessage = (e) => {
     try {
       const item = JSON.parse(e.data);
+      const logBox = document.getElementById("log-content");
 
       if (item.isUpdate) {
         // 全双工智能折叠：就地更新最后一行，刷新时间戳与徽标 x99
@@ -2699,45 +2778,50 @@ async function initLogStream() {
           allReceivedLogs.push(item);
         }
 
-        const logBox = document.getElementById("log-content");
-        const existingLine = item.id ? logBox.querySelector(`[data-log-id="${item.id}"]`) : null;
-        if (existingLine) {
-          const repeatBadge = item.repeatCount > 1 ? `<span class="badge-repeat">x${item.repeatCount}</span>` : '';
-          existingLine.innerHTML = `
-            <span class="log-time">[${item.timestamp}]</span>
-            <span class="log-source">[${item.source}]</span>
-            <span class="log-text">${escapeHtml(item.message)}</span>${repeatBadge}
-          `;
-          existingLine.classList.remove('log-flash');
-          void existingLine.offsetWidth;
-          existingLine.classList.add('log-flash');
-          if (autoScroll) logBox.scrollTop = logBox.scrollHeight;
-          return;
+        if (logBox) {
+          const existingLine = item.id ? logBox.querySelector(`[data-log-id="${item.id}"]`) : null;
+          if (existingLine) {
+            // 如果此条日志不再符合当前过滤条件 (例如在移动云视图收到了天翼云折叠消息)，从 DOM 移除
+            if (!shouldDisplayLogItem(item)) {
+              existingLine.remove();
+            } else {
+              const repeatBadge = item.repeatCount > 1 ? `<span class="badge-repeat">x${item.repeatCount}</span>` : '';
+              existingLine.innerHTML = `
+                <span class="log-time">[${item.timestamp}]</span>
+                <span class="log-source">[${item.source}]</span>
+                <span class="log-text">${escapeHtml(item.message)}</span>${repeatBadge}
+              `;
+              existingLine.classList.remove('log-flash');
+              void existingLine.offsetWidth;
+              existingLine.classList.add('log-flash');
+              if (autoScroll) logBox.scrollTop = logBox.scrollHeight;
+            }
+            return;
+          }
+
+          // DOM 中尚无该行，且符合当前过滤条件时动态追加
+          if (shouldDisplayLogItem(item)) {
+            const emptyEl = logBox.querySelector('.log-line');
+            if (emptyEl && emptyEl.innerText.includes('[暂无此类日志]')) {
+              emptyEl.remove();
+            }
+            logBox.appendChild(createLogLineElement(item));
+            if (autoScroll) logBox.scrollTop = logBox.scrollHeight;
+          }
         }
+        return;
       }
 
       allReceivedLogs.push(item);
       if (allReceivedLogs.length > 3000) allReceivedLogs.shift();
 
-      // 判断是否符合当前筛选条件
-      let match = true;
-      if (activeLogFilter === 'heartbeat' && item.source !== 'Heartbeat') match = false;
-      if (activeLogFilter === 'tasks' && item.source === 'Heartbeat') match = false;
-
-      if (match) {
-        const logBox = document.getElementById("log-content");
-        const line = document.createElement("div");
-        line.className = `log-line log-level-${item.level || 'info'}`;
-        if (item.id) line.dataset.logId = item.id;
-        const repeatBadge = (item.repeatCount && item.repeatCount > 1) 
-          ? `<span class="badge-repeat">x${item.repeatCount}</span>` 
-          : '';
-        line.innerHTML = `
-          <span class="log-time">[${item.timestamp}]</span>
-          <span class="log-source">[${item.source}]</span>
-          <span class="log-text">${escapeHtml(item.message)}</span>${repeatBadge}
-        `;
-        logBox.appendChild(line);
+      // 实时追加：严格检查是否符合当前平台视图与业务类型过滤规则
+      if (logBox && shouldDisplayLogItem(item)) {
+        const emptyEl = logBox.querySelector('.log-line');
+        if (emptyEl && emptyEl.innerText.includes('[暂无此类日志]')) {
+          emptyEl.remove();
+        }
+        logBox.appendChild(createLogLineElement(item));
         if (autoScroll) logBox.scrollTop = logBox.scrollHeight;
       }
     } catch (err) {}
