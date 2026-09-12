@@ -4348,27 +4348,46 @@ function rewardNeedsDesktop(prodId, prodType) {
     }
 
     const exportData = {
-      exportVersion: '2.1.0',
+      exportVersion: '2.1.3',
       exportTime: getBeijingTimeString(),
       exportedBy: session.username,
       role: session.role,
       settings: session.role === 'admin' ? appConfig.settings : undefined,
-      accounts: exportAccounts.map(a => ({
-        platform: a.platform || (a.accountType || (a.features && a.features.cagKeepAlive !== undefined) ? 'ydpc' : 'ctyun'),
-        accountType: a.accountType,
-        name: a.name,
-        user: a.user,
-        password: a.password || '',
-        deviceCode: a.deviceCode,
-        keepaliveInterval: a.keepaliveInterval,
-        displayConfig: a.displayConfig,
-        enabled: a.enabled,
-        bound: a.bound,
-        features: a.features,
-        redeemConfig: a.redeemConfig,
-        vms: a.vms,
-        desktops: a.desktops
-      }))
+      accounts: exportAccounts.map(a => {
+        const isYd = a.platform === 'ydpc' || !!a.accountType;
+        if (isYd) {
+          // 移动云电脑标准化导出 (明确标注 platform: ydpc，区分 main 和家亲主账号 / sub 独立子账号)
+          return {
+            platform: 'ydpc',
+            accountType: a.accountType || 'main',
+            name: a.name || a.user,
+            user: a.user,
+            password: a.password || '',
+            deviceCode: a.deviceCode || '',
+            keepaliveInterval: parseInt(a.keepaliveInterval) || 600,
+            enabled: a.enabled !== false,
+            features: a.features || { autoBoot: true, cagKeepAlive: true, sohoHeartbeat: true, keepAlive: true },
+            vms: a.vms || []
+          };
+        } else {
+          // 天翼云电脑标准化导出 (明确标注 platform: ctyun，区分 qrcode 扫码绑定 / password 账密绑定)
+          const isQr = !a.password;
+          return {
+            platform: 'ctyun',
+            authMode: isQr ? 'qrcode' : 'password',
+            name: a.name || a.user,
+            user: a.user,
+            password: a.password || '',
+            deviceCode: a.deviceCode || '',
+            displayConfig: a.displayConfig || { width: 2560, height: 1440, scale: 150 },
+            enabled: a.enabled !== false,
+            bound: a.bound !== false,
+            features: a.features || { keepAlive: true, autoSign: true, aiChat: true, cloudHang: true, autoRedeem: false },
+            redeemConfig: a.redeemConfig || { enabled: false, targetType: 'redeem' },
+            desktops: a.desktops || []
+          };
+        }
+      })
     };
 
     appendLog('System', `用户 [${session.username}] 导出了 ${exportAccounts.length} 个账号的配置备份`, 'info');
@@ -4426,32 +4445,48 @@ function rewardNeedsDesktop(prodId, prodType) {
     for (const item of importAccounts) {
       if (!item.user) continue;
 
-      // 智能全维度识别移动云账号：支持新旧版本备份文件、字母子账号、features特征以及名称关键字
-      const isYdpc = 
-        item.platform === 'ydpc' ||
-        item.accountType === 'sub' ||
-        item.accountType === 'main' ||
-        (item.features && (item.features.cagKeepAlive !== undefined || item.features.sohoHeartbeat !== undefined)) ||
-        item.keepaliveInterval !== undefined ||
-        (typeof item.name === 'string' && (item.name.includes('移动') || /ydpc/i.test(item.name))) ||
-        (typeof item.user === 'string' && (/^[a-zA-Z0-9_]{4,20}$/.test(item.user) && !/^\d{11}$/.test(item.user))) ||
-        (Array.isArray(item.vms) && item.vms.length > 0);
+      // ── 平台归属判定 (第一优先级：显式 platform 标签绝对优先，绝不篡改) ──
+      let isYdpc = false;
+      if (item.platform === 'ydpc') {
+        isYdpc = true;
+      } else if (item.platform === 'ctyun') {
+        isYdpc = false;
+      } else {
+        // 第二优先级：仅针对缺失 platform 字段的历史老版本备份，按特征严格判定
+        const hasYdpcFeatures = item.features && (item.features.cagKeepAlive === true || item.features.sohoHeartbeat === true);
+        const hasCtyunFeatures = item.features && (item.features.autoSign !== undefined || item.features.aiChat !== undefined || item.features.cloudHang !== undefined || item.redeemConfig !== undefined);
 
-      const isQrAccount = !item.password && !isYdpc;
+        if (item.accountType === 'sub' || item.accountType === 'main') {
+          isYdpc = true;
+        } else if (hasYdpcFeatures && !hasCtyunFeatures) {
+          isYdpc = true;
+        } else if (Array.isArray(item.vms) && item.vms.length > 0) {
+          isYdpc = true;
+        } else if (typeof item.name === 'string' && item.name.includes('移动') && !item.name.includes('天翼')) {
+          isYdpc = true;
+        } else {
+          isYdpc = false; // 默认天翼云
+        }
+      }
 
-      // 如果是 merge，检查手机号是否已存在
-      const existing = appConfig.accounts.find(a => a.user === item.user && a.ownerId === targetOwnerId && (a.platform || 'ctyun') === (isYdpc ? 'ydpc' : 'ctyun'));
+      const platformStr = isYdpc ? 'ydpc' : 'ctyun';
+
+      // ── 天翼云登录模式判定 (authMode === 'qrcode' 或密码为空均视为扫码绑定) ──
+      const isQrAccount = !isYdpc && (item.authMode === 'qrcode' || !item.password);
+
+      // 如果是 merge，检查手机号/账号名是否已存在同平台账号
+      const existing = appConfig.accounts.find(a => a.user === item.user && a.ownerId === targetOwnerId && (a.platform || 'ctyun') === platformStr);
       if (existing) {
         existing.name = item.name || existing.name;
         if (item.password) existing.password = item.password;
-        if (item.accountType) existing.accountType = item.accountType;
-        if (item.keepaliveInterval) existing.keepaliveInterval = item.keepaliveInterval;
+        if (isYdpc && item.accountType) existing.accountType = item.accountType;
+        if (isYdpc && item.keepaliveInterval) existing.keepaliveInterval = item.keepaliveInterval;
         if (item.deviceCode) existing.deviceCode = item.deviceCode;
         if (item.displayConfig) existing.displayConfig = { ...existing.displayConfig, ...item.displayConfig };
         if (item.features) existing.features = { ...existing.features, ...item.features };
         if (item.redeemConfig) existing.redeemConfig = { ...existing.redeemConfig, ...item.redeemConfig };
-        if (item.vms && item.vms.length > 0) existing.vms = item.vms;
-        if (item.desktops && item.desktops.length > 0) existing.desktops = item.desktops;
+        if (isYdpc && Array.isArray(item.vms) && item.vms.length > 0) existing.vms = item.vms;
+        if (!isYdpc && Array.isArray(item.desktops) && item.desktops.length > 0) existing.desktops = item.desktops;
         importedCount++;
         continue;
       }
@@ -4459,14 +4494,14 @@ function rewardNeedsDesktop(prodId, prodType) {
       const id = (isYdpc ? 'yd_' : 'ct_') + crypto.randomUUID().substring(0, 8);
       const newAcc = {
         id,
-        platform: isYdpc ? 'ydpc' : 'ctyun',
+        platform: platformStr,
         ownerId: targetOwnerId,
-        accountType: item.accountType || (isYdpc ? 'main' : undefined),
+        accountType: isYdpc ? (item.accountType || 'main') : undefined,
         name: item.name || item.user,
         user: item.user,
         password: item.password || '',
         deviceCode: item.deviceCode || generateDeviceCode(),
-        keepaliveInterval: parseInt(item.keepaliveInterval) || 600,
+        keepaliveInterval: isYdpc ? (parseInt(item.keepaliveInterval) || 600) : undefined,
         displayConfig: item.displayConfig || { width: 2560, height: 1440, scale: 150 },
         enabled: item.enabled !== false,
         bound: isYdpc ? true : (item.bound !== false),
@@ -4480,7 +4515,7 @@ function rewardNeedsDesktop(prodId, prodType) {
           keepAlive: true,
           autoSign: true,
           aiChat: true,
-          cloudHang: false,
+          cloudHang: true,
           autoRedeem: false
         }),
         redeemConfig: item.redeemConfig || {
@@ -4498,15 +4533,15 @@ function rewardNeedsDesktop(prodId, prodType) {
           intervalDays: 1,
           lastRedeemDate: ''
         },
-        vms: item.vms || [],
-        desktops: item.desktops || [],
+        vms: isYdpc ? (item.vms || []) : [],
+        desktops: !isYdpc ? (item.desktops || []) : [],
         stats: item.stats || {
           lastSignTime: '',
           lastAiChatTime: '',
           lastHangTime: '',
           hangMinutesToday: 0,
           points: 0,
-          keepAliveStatus: isYdpc ? 'online' : 'offline',
+          keepAliveStatus: isYdpc ? 'online' : (isQrAccount ? 'offline' : 'online'),
           lastError: ''
         }
       };
