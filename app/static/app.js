@@ -1253,7 +1253,7 @@ async function toggleFeature(accId, featureKey, checked) {
 // 3. 添加/编辑账号
 async function refreshModalCaptcha() {
   const user = document.getElementById("acc-user").value.trim() || '13800000000';
-  const devCode = document.getElementById("acc-device-code").value.trim() || '';
+  let devCode = document.getElementById("acc-device-code").value.trim();
   const imgEl = document.getElementById("acc-captcha-img");
   const loadingEl = document.getElementById("acc-captcha-loading");
 
@@ -1268,6 +1268,9 @@ async function refreshModalCaptcha() {
       currentCaptchaChallenge = data;
       document.getElementById("acc-challenge-id").value = data.challengeId;
       document.getElementById("acc-challenge-code").value = data.challengeCode;
+      if (data.deviceCode) {
+        document.getElementById("acc-device-code").value = data.deviceCode;
+      }
       imgEl.src = data.captchaImage;
       imgEl.style.display = "block";
       loadingEl.style.display = "none";

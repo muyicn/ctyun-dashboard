@@ -630,6 +630,7 @@ class CtYunClient {
     this.isWebUserActive = false; // 用户是否正在通过浏览器操作云电脑
     this.webUserActiveUntil = 0;
     this.externalYieldUntil = 0; // 官方客户端抢占避让截止时间戳
+    this.lastTokenRenewAt = Date.now();
   }
 
   // 检测今日挂机 1 小时任务是否已达成 (严格依据今日真实达成状态)
@@ -747,6 +748,38 @@ class CtYunClient {
     };
   }
 
+  // 生成单点登录/免密直通 Token (用于无感静默续期与直达操作)
+  async genLoginToken(effectiveSeconds = 300) {
+    if (!this.loginInfo) {
+      throw new Error('账号尚未登录，无法生成登录 Token');
+    }
+    const res = await fetchWithTimeout('https://desk.ctyun.cn:8810/api/auth/client/genLoginToken', {
+      method: 'POST',
+      headers: this.getSignedHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ authAppModel: 34, effectiveSeconds })
+    });
+    const json = await res.json();
+    if (json.code === 0 && json.data?.token) {
+      return json.data.token;
+    }
+    throw new Error(json.msg || `获取免密 Token 失败 (Code: ${json.code})`);
+  }
+
+  // 无感静默轮转刷新 Token (通过现有会话生成免密票据并重新登录换取全新凭据，彻底杜绝会话失效)
+  async renewToken() {
+    if (!this.loginInfo) {
+      throw new Error('账号尚未登录，无法续期');
+    }
+    const loginToken = await this.genLoginToken(300);
+    const newInfo = await this.loginByToken(loginToken);
+    this.loginInfo = newInfo;
+    this.account.savedLoginInfo = newInfo;
+    this.account.sessionExpired = false;
+    saveConfig(appConfig);
+    appendLog('Auth', `[${this.account.name || this.account.user}] 🔄 天翼云会话已自动无感续期刷新！`, 'info', this.account.name, 'ctyun');
+    return newInfo;
+  }
+
   // 会话失效检测与 Webhook 告警机制
   handleSessionExpired(reason = '登录凭据失效') {
     const accName = this.account.name || this.account.user;
@@ -768,6 +801,15 @@ class CtYunClient {
   async login(maxRetries = 1) {
     if (this.loginInfo && !this.account.sessionExpired) {
       return { success: true, data: this.loginInfo };
+    }
+    // 优先尝试无感静默续期刷新
+    if (this.loginInfo) {
+      try {
+        const newInfo = await this.renewToken();
+        if (newInfo) {
+          return { success: true, data: newInfo };
+        }
+      } catch (e) {}
     }
     this.handleSessionExpired('会话已过期，需要人工验证登录');
     return { success: false, error: '会话已过期，请在控制台输入验证码重新登录！' };
@@ -1024,14 +1066,14 @@ class CtYunClient {
   }
 
   async getDesktops() {
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      if (!this.loginInfo) {
-        const logRes = await this.login();
-        if (!logRes.success) throw new Error(logRes.error);
-      }
+    if (!this.loginInfo) {
+      return this.desktopsCache || [];
+    }
 
+    for (let attempt = 1; attempt <= 2; attempt++) {
       const mergedList = [];
       const seenIds = new Set();
+      let isAuthExpired = false;
 
       // 1. 全规格 pageDesktop 查询云电脑 (支持独立机、池化及抢占式)
       try {
@@ -1040,6 +1082,7 @@ class CtYunClient {
           headers: this.getSignedHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             getCnt: 50,
+            desktopTypes: ['1', '2001', '2002', '2003'],
             sortType: 'createTimeV1'
           })
         });
@@ -1053,6 +1096,8 @@ class CtYunClient {
               mergedList.push(d);
             }
           }
+        } else if (json.code === 40010 || String(json.msg || '').includes('登录信息已过期') || String(json.msg || '').includes('会话已过期')) {
+          isAuthExpired = true;
         }
       } catch (e) {}
 
@@ -1072,6 +1117,8 @@ class CtYunClient {
               mergedList.push(d);
             }
           }
+        } else if (jsonList.code === 40010 || String(jsonList.msg || '').includes('登录信息已过期') || String(jsonList.msg || '').includes('会话已过期')) {
+          isAuthExpired = true;
         }
       } catch (e) {}
 
@@ -1081,21 +1128,45 @@ class CtYunClient {
         return mergedList;
       }
 
-      // 若未查询到，强制刷新凭据重试一次
-      if (attempt === 1) {
-        this.loginInfo = null;
+      // 如果明确是会话过期错误且是第 1 次尝试，执行无感自动续期重试
+      if (isAuthExpired && attempt === 1) {
+        try {
+          await this.renewToken();
+          continue; // 用新凭据重试
+        } catch (e) {
+          this.handleSessionExpired('登录凭据已过期，自动续期失败');
+          break;
+        }
       }
+
+      break;
     }
     return this.desktopsCache || [];
   }
 
   async connect(desktopId, vdCommand = '') {
     if (!this.loginInfo) {
-      const logRes = await this.login();
-      if (!logRes.success) throw new Error(logRes.error);
+      throw new Error('未登录');
     }
+
+    const dIdStr = String(desktopId);
+
+    // 1. 优先通过官方首选 status 接口获取桌面连接与证书信息 (普通单机优先)
+    try {
+      const statusUrl = `https://desk.ctyun.cn:8810/api/desktop/client/status?desktopId=${encodeURIComponent(dIdStr)}&specifiedCertCategory=1`;
+      const sRes = await fetchWithTimeout(statusUrl, { headers: this.getSignedHeaders() });
+      const sJson = await sRes.json();
+      if (sJson.code === 0 && sJson.data?.desktopInfo?.clinkLvsOutHost) {
+        return sJson.data.desktopInfo;
+      }
+      if (sJson.code === 40010 || String(sJson.msg || '').includes('登录信息已过期') || String(sJson.msg || '').includes('会话已过期')) {
+        await this.renewToken().catch(() => {});
+      }
+    } catch (e) {}
+
+    // 2. 备用通过 connect 接口获取 (政企桌面池 / 启动中虚拟机等)
     const connBody = new URLSearchParams({
-      objId: desktopId,
+      objId: dIdStr,
       objType: '0',
       osType: '15',
       deviceId: this.deviceType,
@@ -1106,9 +1177,11 @@ class CtYunClient {
       deviceName: 'Chrome浏览器',
       deviceType: this.deviceType,
       deviceModel: 'Windows NT 10.0; Win64; x64',
+      desktopId: dIdStr,
       appVersion: '3.2.0',
       sysVersion: 'Windows NT 10.0; Win64; x64',
-      clientVersion: this.version
+      clientVersion: this.version,
+      specifiedCertCategory: '1'
     });
 
     const res = await fetchWithTimeout('https://desk.ctyun.cn:8810/api/desktop/client/connect', {
@@ -1120,6 +1193,9 @@ class CtYunClient {
     if (json.code === 0) {
       // 若云电脑已关机，服务端返回 desktopInfo 为 null 且带有 goingRetry: true
       return json.data?.desktopInfo || null;
+    }
+    if (json.code === 40010 || String(json.msg || '').includes('登录信息已过期') || String(json.msg || '').includes('会话已过期')) {
+      await this.renewToken().catch(() => {});
     }
     throw new Error(json.msg || '获取云电脑连接配置失败');
   }
@@ -1273,13 +1349,16 @@ class CtYunClient {
   }
 
   async refreshOfficialTasks() {
-    if (!this.loginInfo) await this.login();
     if (!this.loginInfo) return;
 
     try {
       const taskRes = await (await fetchWithTimeout('https://desk.ctyun.cn/selforder/api/marketing/userPoints/getTaskList', {
         headers: this.getSignedHeaders()
       })).json();
+
+      if (taskRes.code === 40010 || String(taskRes.msg || '').includes('登录信息已过期') || String(taskRes.msg || '').includes('会话已过期')) {
+        await this.renewToken().catch(() => {});
+      }
 
       if (taskRes.code === 0 && taskRes.data) {
         this.metrics.officialTasks = taskRes.data.map(t => ({
@@ -1333,7 +1412,6 @@ class CtYunClient {
         this.metrics.userPoints = validItem ? (validItem.points || 0) : 0;
         this.account.stats.points = this.metrics.userPoints;
       }
-
       saveConfig(appConfig);
     } catch (e) {}
   }
@@ -1748,6 +1826,13 @@ class CtYunClient {
           } else {
             this.isWebUserActive = false;
           }
+        }
+
+        // 定期主动无感续期 (每 12 小时静默轮转刷新一次 Token 凭据，确保持久常驻不失效)
+        if (!this.lastTokenRenewAt || (Date.now() - this.lastTokenRenewAt > 12 * 3600 * 1000)) {
+          this.renewToken().then(() => {
+            this.lastTokenRenewAt = Date.now();
+          }).catch(() => {});
         }
 
         // 1. 查询名下全部云电脑
@@ -3260,7 +3345,7 @@ function rewardNeedsDesktop(prodId, prodType) {
     }
 
     const phone = pathname.split('/')[3] || '';
-    const deviceCode = parsedUrl.searchParams.get('deviceCode') || generateDeviceCode();
+    const deviceCode = (parsedUrl.searchParams.get('deviceCode') || '').trim() || generateDeviceCode();
 
     try {
       // 1. 获取 Challenge Code
@@ -3297,6 +3382,7 @@ function rewardNeedsDesktop(prodId, prodType) {
         success: true,
         challengeCode,
         challengeId,
+        deviceCode,
         captchaImage: base64Img
       });
     } catch (e) {
