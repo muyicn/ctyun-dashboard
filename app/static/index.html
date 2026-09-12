@@ -823,7 +823,7 @@
       <div>云电脑可视化全功能多账号管理平台 · 纯协议超轻量架构</div>
       <div style="margin-top: 6px;" id="footer-version-container">
         <span id="footer-version-badge" style="color: var(--text-muted); cursor: default;">
-          📌 当前版本: v2.1
+          📌 当前版本: v2.1.1
         </span>
       </div>
     </footer>
@@ -831,24 +831,59 @@
 
   <!-- 版本更新介绍模态框 -->
   <div class="modal-backdrop hidden" id="release-notes-modal">
-    <div class="modal" style="max-width: 620px;">
+    <div class="modal" style="max-width: 650px; max-height: 85vh; display: flex; flex-direction: column;">
       <div class="modal-header">
-        <h3>🚀 版本更新说明 (v2.1)</h3>
+        <h3>🚀 版本更新说明 (v2.1.1)</h3>
         <button class="modal-close" onclick="closeModal('release-notes-modal')">&times;</button>
       </div>
-      <div class="modal-body" style="font-size: 13.5px; line-height: 1.7; color: #334155;">
-        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;">
-          <div style="font-weight: 700; color: #0f172a; font-size: 14.5px; margin-bottom: 4px;">✨ v2.1 重点特性概览</div>
-          <div style="color: #64748b; font-size: 12px;">发布时间：2026-09-11</div>
+      <div class="modal-body" style="font-size: 13px; line-height: 1.7; color: #334155; overflow-y: auto; max-height: calc(85vh - 120px); display: flex; flex-direction: column; gap: 16px;">
+        
+        <!-- v2.1.1 -->
+        <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; border-bottom: 1px solid #dbeafe; padding-bottom: 6px;">
+            <div style="font-weight: 700; color: #1d4ed8; font-size: 14.5px;">✨ v2.1.1 重点特性与优化 (最新)</div>
+            <div style="color: #64748b; font-size: 12px;">发布时间：2026-09-12</div>
+          </div>
+          <ul style="padding-left: 18px; display: flex; flex-direction: column; gap: 6px; margin: 0;">
+            <li><b>⏰ 分项 Cron 独立调度解耦</b>：分项 Cron 规则与主调度时间点彻底解耦，配置分项 Cron 后主时间点自动跳过对应分项，开机补跑按分项精准执行，绝不抢跑重复执行。</li>
+            <li><b>🎁 单笔原子总积分兑换引擎</b>：兑换多数量商品（如 10G 数据盘、30 天升配包）单笔直传总积分，云端原子化合并出单，彻底消除多件连续下单时的云端异步扩容锁定冲突。</li>
+            <li><b>🎯 全品类奖项绑定规则对齐</b>：升配包与数据盘扩容强制绑定云电脑，智库、云手机与游戏电脑直发型商品自动绑定手机号，不再误报未找到云电脑。</li>
+            <li><b>🔑 管理员改名与防重建加固</b>：按角色判定管理员存在性，管理员改名或删除后系统不再重复生成默认 admin，改名实时日志变量精准对应。</li>
+            <li><b>👤 普通用户界面精简</b>：头像下拉菜单按角色动态展示，普通用户仅显示修改密码与头像，隐藏管理员专有入口。</li>
+          </ul>
         </div>
-        <ul style="padding-left: 20px; display: flex; flex-direction: column; gap: 8px;">
-          <li><b>📱 移动云电脑全量融合</b>：中国移动云电脑保活（SOHO REST 签名加密 + ZTEC CAG TCP 三阶段握手 + SC/ZTE 自适应开机），零 Python 依赖，与天翼云同台统一管理、统一配额。</li>
-          <li><b>🛡️ 多账号多机全量保活</b>：单账号名下多台云主机全部纳管保活。</li>
-          <li><b>🧩 网格自由排版</b>：账号卡片支持拖拽排序与行内留白放置（允许空位、不产生多余空行），布局状态按用户与平台视图持久化，刷新不走样。</li>
-          <li><b>🚫 无感刷新与滚动锁定</b>：全面重构为原地增量数据更新（In-Place Update），后台轮询不再整页重绘，彻底消除"刷着刷着跳回顶部"与操作被打断的问题。</li>
-          <li><b>🖥️ 设备硬件规格展示</b>：天翼云与移动云设备统一显示 设备 ID 与核心规格，按官方套餐版本智能映射，双云呈现完全对齐。</li>
-          <li><b>👥 多用户体系完善</b>：管理员/普通用户权限彻底解耦，全局调度设置仅管理员可见；每用户独立通知推送渠道（企业微信/钉钉/飞书/Bark 等 8 渠道）、独立头像与配额管理。</li>
-        </ul>
+
+        <!-- v2.1 -->
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px;">
+            <div style="font-weight: 700; color: #0f172a; font-size: 14px;">✨ v2.1 重点特性概览</div>
+            <div style="color: #64748b; font-size: 12px;">发布时间：2026-09-11</div>
+          </div>
+          <ul style="padding-left: 18px; display: flex; flex-direction: column; gap: 6px; margin: 0;">
+            <li><b>📱 移动云电脑全量融合</b>：中国移动云电脑保活（SOHO REST 签名加密 + ZTEC CAG TCP 三阶段握手 + SC/ZTE 自适应开机），零 Python 依赖，与天翼云同台统一管理、统一配额。</li>
+            <li><b>🛡️ 多账号多机全量保活</b>：单账号名下多台云主机全部纳管保活。</li>
+            <li><b>🧩 网格自由排版</b>：账号卡片支持拖拽排序与行内留白放置（允许空位、不产生多余空行），布局状态按用户与平台视图持久化，刷新不走样。</li>
+            <li><b>🚫 无感刷新与滚动锁定</b>：全面重构为原地增量数据更新（In-Place Update），后台轮询不再整页重绘，彻底消除"刷着刷着跳回顶部"与操作被打断的问题。</li>
+            <li><b>🖥️ 设备硬件规格展示</b>：天翼云与移动云设备统一显示 设备 ID 与核心规格，按官方套餐版本智能映射，双云呈现完全对齐。</li>
+            <li><b>👥 多用户体系完善</b>：管理员/普通用户权限彻底解耦，全局调度设置仅管理员可见；每用户独立通知推送渠道（企业微信/钉钉/飞书/Bark 等 8 渠道）、独立头像与配额管理。</li>
+          </ul>
+        </div>
+
+        <!-- v2.0.2 -->
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px;">
+            <div style="font-weight: 700; color: #0f172a; font-size: 14px;">✨ v2.0.2 重点特性概览</div>
+            <div style="color: #64748b; font-size: 12px;">发布时间：2026-09-09</div>
+          </div>
+          <ul style="padding-left: 18px; display: flex; flex-direction: column; gap: 6px; margin: 0;">
+            <li><b>🛡️ 三位一体防冲突引擎</b>：全面升级握手前置拦截与 Type 119/120 信令监听。当你在 PC 或手机 App 打开云电脑时，后台 10ms 内极速主动避让，绝不互踢！</li>
+            <li><b>🖥️ 单账号多云电脑支持</b>：全形态兼容个人独立机、政企桌面池（POOL）与抢占式云电脑，同一账号名下多台机器独立展现、独立电源管理与直通访问。</li>
+            <li><b>📱 官方 App 扫码免密一键登录</b>：新增天翼云官方二维码授权登录，手机天翼云 App 扫一扫秒级完成绑定，免输验证码与短信。</li>
+            <li><b>⏱️ 智能脉冲保活机制</b>：未开启挂机或今日挂机达标后，系统转入极简脉冲待机，99% 时间释放连接通道给官方客户端。</li>
+            <li><b>⚡ 纯协议极致轻量化</b>：彻底剔除 Chromium 重型浏览器依赖，纯原生协议连接，内存仅约 20MB，各类 NAS 极速常驻运行。</li>
+          </ul>
+        </div>
+
       </div>
       <div class="modal-footer">
         <button class="btn btn-primary" onclick="closeModal('release-notes-modal')">我知道了</button>
