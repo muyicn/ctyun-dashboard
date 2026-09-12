@@ -1395,6 +1395,9 @@ function openAddAccountModal() {
   const platformTabs = document.getElementById("platform-tabs-container");
   if (platformTabs) platformTabs.style.display = "flex";
 
+  const tabContainer = document.getElementById("acc-login-tabs");
+  if (tabContainer) tabContainer.style.display = "flex";
+
   openModal("account-modal");
   switchAddAccountPlatform('ctyun');
 }
@@ -1453,8 +1456,13 @@ function switchAddAccountPlatform(platform) {
     if (panelCt) panelCt.classList.remove("hidden");
     if (panelYd) panelYd.classList.add("hidden");
     if (btnSaveYd) btnSaveYd.style.display = "none";
-    if (modalTitle) modalTitle.innerText = "添加天翼云电脑账号";
-    switchAccountLoginTab('qrcode');
+    const isNew = !document.getElementById("acc-id").value;
+    if (modalTitle && isNew) modalTitle.innerText = "添加天翼云电脑账号";
+    if (isNew) {
+      const tabContainer = document.getElementById("acc-login-tabs");
+      if (tabContainer) tabContainer.style.display = "flex";
+      switchAccountLoginTab('qrcode');
+    }
   }
 }
 
