@@ -2106,7 +2106,18 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 云电脑 Web 免密直通网关视图 (直接打开操作界面，预置鉴权凭据与锁定 2560x1440 @ 150% 分辨率)
+  // 判断商品是否需要绑定云电脑 (完全对齐 CtYun-Keeper RewardNeedsDesktop)
+function rewardNeedsDesktop(prodId, prodType) {
+  const pId = Number(prodId);
+  if ([17023101, 17023111, 17024101, 17026101, 17026111].includes(pId)) {
+    return true;
+  }
+  const typeLower = String(prodType || '').toLowerCase().trim();
+  if (typeLower === 'pointstplupgrade' || typeLower === 'pointsdiskupgrade') {
+    return true;
+  }
+  return false;
+}
   if (pathname === '/desktop-view') {
     const session = getSessionFromReq(req, parsedUrl);
     if (!session) {
@@ -2551,9 +2562,10 @@ const server = http.createServer(async (req, res) => {
     }
     const body = await parseJsonBody(req);
     const newUsername = (body.newUsername || '').trim();
-    const updateRes = authManager.updateAdminUsername(session.username, newUsername);
+    const oldUsername = session.username;
+    const updateRes = authManager.updateAdminUsername(oldUsername, newUsername);
     if (updateRes.success) {
-      appendLog('Auth', `管理员用户名已从 [${session.username}] 修改为 [${newUsername}]`, 'warning');
+      appendLog('Auth', `管理员用户名已从 [${oldUsername}] 修改为 [${newUsername}]`, 'warning');
       jsonResponse(res, updateRes);
     } else {
       jsonResponse(res, updateRes, 400);
@@ -3817,95 +3829,104 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // 目标云电脑：优先用请求指定，其次用内存缓存，不做任何实时查询
+      // 目标云电脑判定 (对齐 CtYun-Keeper RewardNeedsDesktop 机制)
+      const needsDesktop = rewardNeedsDesktop(prodId, prodType);
       const targetDesktopId = parseInt(body.desktopId) || parseInt(client.metrics.desktopId) || parseInt(acc.stats?.desktopId) || 0;
-      if (!targetDesktopId) {
-        jsonResponse(res, { error: '未找到绑定的云电脑，请先在卡片中确认名下设备后再兑换！' }, 400);
+      if (needsDesktop && !targetDesktopId) {
+        jsonResponse(res, { error: '该商品（升配/数据盘扩容）必须选择绑定的目标云电脑！' }, 400);
         return;
       }
 
-      appendLog('Redeem', `[${acc.name}] 正在向天翼云发起真实下单: ${prodName} x${times}，预计消耗 ${totalCost} 积分 (商品类型: ${prodType})...`, 'info');
+      appendLog('Redeem', `[${acc.name}] 正在向天翼云发起真实下单: ${prodName} x${times}，总计 ${totalCost} 积分 (商品类型: ${prodType})...`, 'info');
 
       const placeOrderUrl = 'https://desk.ctyun.cn/selforder/api/selforder/paas/placeOrder';
-      let successCount = 0;
+      let success = false;
       let lastError = '';
       let isRisk = false;
 
-      // 多件拆单：与官方网页前端完全一致 —— 每次只提交 1 个 SKU、单件积分价，串行下单模拟真人连买
-      for (let round = 1; round <= times; round++) {
-        let orderSuccess = false;
-        // 单笔订单失败自动重试上限 3 次，每次间隔 3 秒；命中风控立即终止全部兑换
-        for (let attempt = 1; attempt <= 3; attempt++) {
-          try {
-            if (attempt > 1) {
-              appendLog('Redeem', `[${acc.name}] 第 ${round}/${times} 件第 ${attempt}/3 次自动重试...`, 'info');
-              await new Promise(r => setTimeout(r, 3000));
-            }
-
-            // 报文与官方网页版前端逐字段一致（pointType 恒 1 / 单 SKU / execSort 恒 1 / bindDesktopId 数字型永携带）
-            const orderPayload = {
-              busiChannel: '010',
-              orderType: 1,
-              pointType: 1,
-              points: Number(costPoints),
-              sku: [{
-                execSort: 1,
-                prodId: Number(prodId),
-                prodType,
-                attrs: [{ attrKey: 'bindDesktopId', attrVal: targetDesktopId }]
-              }]
-            };
-
-            const orderRes = await fetch(placeOrderUrl, {
-              method: 'POST',
-              headers: client.getSignedHeaders({ 'Content-Type': 'application/json;charset=UTF-8' }),
-              body: JSON.stringify(orderPayload)
-            });
-            const orderData = await orderRes.json();
-
-            if (orderData.code === 0) {
-              successCount++;
-              orderSuccess = true;
-              appendLog('Redeem', `[${acc.name}] ✅ 第 ${successCount}/${times} 件兑换成功，消耗 ${costPoints} 积分！`, 'success');
-              break;
-            }
-
-            lastError = orderData.msg || `错误码 ${orderData.code}`;
-            if (lastError.includes('风控') || lastError.includes('频繁') || lastError.includes('异常操作')) {
-              isRisk = true;
-              break;
-            }
-            appendLog('Redeem', `[${acc.name}] 第 ${round}/${times} 件第 ${attempt} 次下单失败: ${lastError}`, 'warning');
-          } catch (e) {
-            lastError = e.message;
-          }
-        }
-
-        if (orderSuccess) {
-          // 件与件之间间隔 3 秒，模拟真人连买节奏
-          if (round < times) await new Promise(r => setTimeout(r, 3000));
-          continue;
-        }
-        // 失败即终止后续兑换，绝不连续发送异常报文
-        break;
+      // 报文属性构建 (100% 对齐 CtYun-Keeper buildOrderBody)
+      const orderAttrs = [];
+      if (needsDesktop) {
+        orderAttrs.push({ attrKey: 'bindDesktopId', attrVal: Number(targetDesktopId) });
+      } else {
+        orderAttrs.push({ attrKey: 'mobilephone' });
       }
 
-      if (successCount > 0) {
-        appendLog('Redeem', `[${acc.name}] 🎉 本次共成功兑换 ${successCount}/${times} 件【${prodName}】！`, 'success');
+      // 采用 CtYun-Keeper 同款原子总积分下单 (单笔请求直传总积分 points = costPoints * times)
+      // 天翼云 PaaS 将在云端一次性合并处理，直接生成 xN 扩容工单，彻底规避连续发单导致的扩容中锁定冲突！
+      const orderPayload = {
+        busiChannel: '010',
+        orderType: 1,
+        pointType: Number(body.pointType) || 1,
+        points: Number(totalCost),
+        sku: [{
+          execSort: 1,
+          prodId: Number(prodId),
+          prodType,
+          attrs: orderAttrs
+        }]
+      };
+
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          if (attempt > 1) {
+            appendLog('Redeem', `[${acc.name}] 正在进行第 ${attempt}/3 次自动重试...`, 'info');
+            await new Promise(r => setTimeout(r, 3000));
+          }
+
+          const orderRes = await fetch(placeOrderUrl, {
+            method: 'POST',
+            headers: client.getSignedHeaders({ 'Content-Type': 'application/json;charset=UTF-8' }),
+            body: JSON.stringify(orderPayload)
+          });
+          const orderData = await orderRes.json();
+
+          if (orderData.code === 0) {
+            success = true;
+            appendLog('Redeem', `[${acc.name}] ✅ 成功一次性完成【${prodName}】x${times} 兑换，共扣除 ${totalCost} 积分！`, 'success');
+            break;
+          }
+
+          lastError = orderData.msg || `错误码 ${orderData.code}`;
+          
+          const isFatal = 
+            lastError.includes('积分不足') || 
+            lastError.includes('点数不足') || 
+            lastError.includes('余额不足') ||
+            lastError.includes('风控') || 
+            lastError.includes('频繁') || 
+            lastError.includes('异常操作') ||
+            lastError.includes('超过最大') ||
+            lastError.includes('上限');
+
+          if (isFatal) {
+            if (lastError.includes('风控') || lastError.includes('频繁') || lastError.includes('异常操作')) {
+              isRisk = true;
+            }
+            appendLog('Redeem', `[${acc.name}] 下单触发限制 (${lastError})，终止重试。`, 'warning');
+            break;
+          }
+
+          appendLog('Redeem', `[${acc.name}] 第 ${attempt} 次下单未成功: ${lastError}`, 'warning');
+        } catch (e) {
+          lastError = e.message;
+          appendLog('Redeem', `[${acc.name}] 第 ${attempt} 次网络异常: ${lastError}`, 'warning');
+        }
+      }
+
+      if (success) {
         sendAccountNotification(
           acc,
           `🎉 天翼云积分兑换成功 - ${acc.name}`,
-          `账号 [${acc.name}] 成功兑换 [${prodName}] x${successCount}，共扣除 ${costPoints * successCount} 积分。`
+          `账号 [${acc.name}] 成功兑换 [${prodName}] x${times}，共扣除 ${totalCost} 积分。`
         );
       }
 
       // 下单动作已全部结束，此时再同步官方积分与任务状态（安全窗口）
       await client.refreshOfficialTasks();
 
-      if (successCount === times) {
-        jsonResponse(res, { success: true, message: `兑换成功！共消耗 ${costPoints * successCount} 积分，剩余 ${client.metrics.userPoints} 积分` });
-      } else if (successCount > 0) {
-        jsonResponse(res, { success: true, partial: true, message: `部分成功：已兑换 ${successCount}/${times} 件${isRisk ? '，后续因触发风控而中止' : '，其余下单未成功'}`, error: lastError });
+      if (success) {
+        jsonResponse(res, { success: true, message: `🎉 兑换成功！已成功兑换 ${prodName} x${times}，共消耗 ${totalCost} 积分，剩余 ${client.metrics.userPoints || 0} 积分` });
       } else {
         let errorReason = '';
         const msg = lastError || '';

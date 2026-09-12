@@ -15,19 +15,22 @@ class AuthManager {
     const cfg = this.configManager.config;
     if (!cfg.users) cfg.users = [];
 
-    let admin = cfg.users.find(u => u.username === 'admin');
-    if (!admin) {
-      admin = {
-        id: 'u_admin',
-        username: 'admin',
-        passwordHash: hashPassword('admin123'),
-        role: 'admin',
-        maxQuota: 999,
-        createdAt: new Date().toISOString()
-      };
-      cfg.users.push(admin);
-      this.configManager.saveConfig();
-    }
+    // 按角色判定而非用户名字面量：只要系统中已存在任意管理员（含被改名的），
+    // 一律不再注入默认账号，避免管理员改名/删除后被凭空重建。
+    // 仅在系统完全没有管理员时（全新部署或误删全部管理员的兜底防锁死）才创建默认 admin。
+    const hasAnyAdmin = cfg.users.some(u => u.role === 'admin');
+    if (hasAnyAdmin) return;
+
+    const admin = {
+      id: 'u_admin',
+      username: 'admin',
+      passwordHash: hashPassword('admin123'),
+      role: 'admin',
+      maxQuota: 999,
+      createdAt: new Date().toISOString()
+    };
+    cfg.users.push(admin);
+    this.configManager.saveConfig();
   }
 
   createSession(user) {

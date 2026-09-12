@@ -143,6 +143,11 @@ async function checkCurrentUser() {
       if (dropdownUsername) dropdownUsername.innerText = `${currentUser.username} (${isAdmin ? '管理员' : '普通用户'})`;
       if (menuAdminUsers) menuAdminUsers.classList.toggle("hidden", !isAdmin);
 
+      const menuChangePwd = document.getElementById("menu-change-pwd");
+      if (menuChangePwd) {
+        menuChangePwd.innerText = isAdmin ? "🔒 修改密码/用户名" : "🔒 修改密码";
+      }
+
       const settingsDropdown = document.getElementById("settings-dropdown-container");
       if (settingsDropdown) settingsDropdown.classList.toggle("hidden", !isAdmin);
 
