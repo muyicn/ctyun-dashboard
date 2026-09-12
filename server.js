@@ -9,6 +9,9 @@ const CtYunEncryption = require('./app/ctyun_encryption');
 const { executeNativeAiChat, executeNativeSign, executeNativeHang } = require('./app/tasks/native_tasks');
 const { AuthManager } = require('./app/auth_manager');
 const { TaskScheduler } = require('./app/tasks/scheduler');
+const { SohoClient } = require('./app/ydpc/soho_client');
+const { performCagAuthHold } = require('./app/ydpc/cag_client');
+const { YdpcClient } = require('./app/ydpc/ydpc_client');
 
 // 全局异常拦截看门狗 (确保守护服务长期稳定运行不宕机)
 process.on('uncaughtException', (err) => {
@@ -63,8 +66,16 @@ setInterval(() => {
   }
 }, 3600 * 1000);
 
-function appendLog(source, message, level = 'info', accountName = '') {
+function appendLog(source, message, level = 'info', accountName = '', platform = 'ctyun') {
   const nowTime = getBeijingTimeString();
+
+  // 智能推断平台归属
+  let inferredPlatform = platform || 'ctyun';
+  if (source === 'SOHO' || source === 'CAG' || source === 'CSAP' || source === 'YDPc') {
+    inferredPlatform = 'ydpc';
+  } else if (source === 'Sign' || source === 'AIChat' || source === 'Hang' || source === 'Redeem') {
+    inferredPlatform = 'ctyun';
+  }
 
   // 全双工智能折叠机制：
   // 1. 同来源同内容的完全一致重复消息合并
@@ -81,6 +92,7 @@ function appendLog(source, message, level = 'info', accountName = '') {
     if (isRepeat) {
       last.timestamp = nowTime;
       last.message = message;
+      last.platform = inferredPlatform;
       last.repeatCount = (last.repeatCount || 1) + 1;
 
       const updatePayload = { ...last, isUpdate: true };
@@ -105,6 +117,7 @@ function appendLog(source, message, level = 'info', accountName = '') {
     message,
     level,
     accountName: accountName || '',
+    platform: inferredPlatform,
     repeatCount: 1
   };
 
@@ -209,16 +222,34 @@ function isPrivateIpOrHost(hostname) {
   return false;
 }
 
-function isValidWebhookUrl(rawUrl) {
-  if (!rawUrl || typeof rawUrl !== 'string') return false;
+function isValidWebhookTarget(channel, rawTarget) {
+  if (!rawTarget || typeof rawTarget !== 'string') return false;
+  const target = rawTarget.trim();
+  if (!target) return false;
+
+  const ch = channel || 'webhook';
+  // Token 型推送渠道 (向平台官方公共 API 发送请求)
+  if (ch === 'serverchan' || ch === 'pushplus') {
+    return /^[\w\-]{6,128}$/.test(target);
+  }
+  if (ch === 'telegram') {
+    // 格式 botToken@chatId
+    return /^[\w\-:]+@[\w\-]+$/.test(target);
+  }
+
+  // URL 型推送渠道 (webhook, qywx, dingtalk, feishu, bark)
   try {
-    const u = new URL(rawUrl.trim());
+    const u = new URL(target);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
     if (isPrivateIpOrHost(u.hostname)) return false;
     return true;
   } catch (e) {
     return false;
   }
+}
+
+function isValidWebhookUrl(rawUrl) {
+  return isValidWebhookTarget('webhook', rawUrl);
 }
 
 // 资源归属权鉴权辅助：确保用户只能管理自己名下的账号，admin 可管理全部
@@ -235,10 +266,10 @@ async function sendNotification(settings, title, content, extraVars = {}) {
 
   const channel = notify.channel || 'webhook';
 
-  // SSRF 安全防御校验
-  if (notify.webhookUrl && !isValidWebhookUrl(notify.webhookUrl)) {
+  // SSRF 安全防御与有效性校验
+  if (notify.webhookUrl && !isValidWebhookTarget(channel, notify.webhookUrl)) {
     appendLog('Notify', `[安全拦截] 拒绝向私有/内网或非法协议地址发送 Webhook: ${notify.webhookUrl}`, 'error');
-    return { success: false, message: '安全拦截：禁止向内网/本地私有地址或非法协议发送 Webhook' };
+    return { success: false, message: '安全拦截：禁止向内网/本地私有地址或非法格式发送推送' };
   }
   
   // 模板变量替换
@@ -285,6 +316,53 @@ async function sendNotification(settings, title, content, extraVars = {}) {
       });
       const qywxData = await res.json().catch(() => ({}));
       return { success: res.ok && qywxData.errcode === 0, message: qywxData.errmsg || `HTTP ${res.status}` };
+    } else if (channel === 'dingtalk' && notify.webhookUrl) {
+      // 钉钉自定义机器人 Webhook (支持 markdown 格式)
+      const dingPayload = {
+        msgtype: 'markdown',
+        markdown: {
+          title: finalTitle,
+          text: `### ${finalTitle}\n\n${finalContent}\n\n> 触发时间: ${vars['{time}']}`
+        }
+      };
+      const res = await fetch(notify.webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(dingPayload)
+      });
+      const dingData = await res.json().catch(() => ({}));
+      return { success: res.ok && dingData.errcode === 0, message: dingData.errmsg || `HTTP ${res.status}` };
+    } else if (channel === 'feishu' && notify.webhookUrl) {
+      // 飞书自定义机器人 Webhook (支持 interactive 交互富文本卡片)
+      const feishuPayload = {
+        msg_type: 'interactive',
+        card: {
+          header: {
+            title: {
+              tag: 'plain_text',
+              content: finalTitle
+            },
+            template: 'blue'
+          },
+          elements: [
+            {
+              tag: 'div',
+              text: {
+                tag: 'lark_md',
+                content: `${finalContent}\n\n**触发时间**: ${vars['{time}']}`
+              }
+            }
+          ]
+        }
+      };
+      const res = await fetch(notify.webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(feishuPayload)
+      });
+      const feishuData = await res.json().catch(() => ({}));
+      const isOk = res.ok && (feishuData.code === 0 || feishuData.StatusCode === 0 || feishuData.code === undefined);
+      return { success: isOk, message: feishuData.msg || feishuData.StatusMessage || `HTTP ${res.status}` };
     } else if (channel === 'serverchan' && notify.webhookUrl) {
       const url = `https://sctapi.ftqq.com/${notify.webhookUrl}.send`;
       const res = await fetch(url, {
@@ -320,6 +398,35 @@ async function sendNotification(settings, title, content, extraVars = {}) {
     return { success: false, message: err.message };
   }
   return { success: false, message: '未配置推送目标或通道无效' };
+}
+
+// 针对特定账号的定向通知分发（优先使用云电脑所属用户的专属 Webhook，未配置或系统级事件兜底使用管理员/系统通知）
+async function sendAccountNotification(account, title, content, extraVars = {}) {
+  try {
+    const ownerId = account?.ownerId || 'u_admin';
+    const owner = (appConfig.users || []).find(u => u.id === ownerId);
+    let targetNotify = owner?.notify;
+
+    // 若用户未配置且所属用户为 admin，允许回退到 appConfig.settings?.notify（向下兼容）
+    if (!targetNotify || !targetNotify.enabled) {
+      if (owner?.role === 'admin' && appConfig.settings?.notify?.enabled) {
+        targetNotify = appConfig.settings.notify;
+      }
+    }
+
+    if (targetNotify && targetNotify.enabled) {
+      return await sendNotification(
+        { notify: targetNotify },
+        title,
+        content,
+        { ...extraVars, account: account?.name || account?.user || extraVars.account || '云电脑' }
+      );
+    }
+    return { success: false, message: '该账号所属用户未开启消息推送' };
+  } catch (err) {
+    appendLog('Notify', `定向推送发生异常(已安全隔离): ${err.message}`, 'warning');
+    return { success: false, message: err.message };
+  }
 }
 
 // AES-256-GCM 密码强加密与安全落盘
@@ -398,7 +505,9 @@ function getDefaultConfig() {
         enabled: false,
         channel: 'webhook',
         webhookUrl: ''
-      }
+      },
+      systemTitle: '天翼云/移动云电脑保活签到中心',
+      systemSubtitle: '多账号长连接保活守护 · 多运营商支持 · 每日签到打卡 · 智能挂机'
     },
     users: [],
     accounts: []
@@ -418,9 +527,17 @@ function loadConfig() {
       }
       if (!cfg.accounts) cfg.accounts = [];
       if (!cfg.users) cfg.users = [];
-      // 默认已有账号归属 admin，并解密密码还原至内存
+      // 兼容历史版本：将 settings.notify 自动无损同步至 admin 账号作为其私有通知，保证已有配置不丢失
+      if (cfg.settings?.notify && cfg.settings.notify.enabled) {
+        const adminUser = cfg.users.find(u => u.username === 'admin' || u.role === 'admin');
+        if (adminUser && !adminUser.notify) {
+          adminUser.notify = { ...cfg.settings.notify };
+        }
+      }
+      // 默认已有账号归属 admin，默认平台为 ctyun，并解密密码还原至内存
       cfg.accounts.forEach(a => {
         if (!a.ownerId) a.ownerId = 'u_admin';
+        if (!a.platform) a.platform = 'ctyun';
         if (a.password) a.password = decryptPassword(a.password);
       });
       return cfg;
@@ -640,8 +757,8 @@ class CtYunClient {
     saveConfig(appConfig);
 
     appendLog('Auth', `[${accName}] ⚠️ 登录会话完全失效 (${reason})，已停用自动重试并发出告警通知！`, 'error');
-    sendNotification(
-      appConfig.settings,
+    sendAccountNotification(
+      this.account,
       `⚠️ 天翼云账号凭据失效 - ${accName}`,
       `账号【${accName}】的登录凭据已完全过期或失效 (${reason})。系统已自动停止无效重试，请前往 Web 控制台重新验证登录。`,
       { account: accName, task: '凭据维护', status: '会话失效' }
@@ -676,6 +793,59 @@ class CtYunClient {
     };
   }
 
+  // 智能解析云电脑硬件规格 (完全对齐 ctyun-pro parseDesktopSpec 策略)
+  // 天翼云官方列表接口不直接下发 cpuCore/memoryGB 数值字段，规格一律从 flavorName / desktopName 文本中提取，
+  // 提取不到时按官方套餐版本名智能映射 (旗舰版 16C32G / 尊享·精英 8C16G / 标准 4C8G / 政企 8C16G)
+  static extractDesktopSpecs(item = {}, defaultFlavor = '') {
+    const flavor = String(item.flavorName || item.prodGroupName || '');
+    const name = String(item.desktopName || item.objName || item.poolName || '');
+
+    // 1. 优先从 flavorName 与 desktopName 中提取显式 "4C8G / 8C16G / 4核8G" 规格
+    const specMatch = flavor.match(/(\d+C\d+G)/i) || name.match(/(\d+C\d+G)/i);
+    if (specMatch) {
+      const spec = specMatch[1].toUpperCase(); // e.g. "8C16G"
+      const cpuNum = spec.match(/^(\d+)C/)[1];
+      const memNum = spec.match(/C(\d+)G/)[1];
+      return {
+        cpu: `${cpuNum}核`,
+        memory: `${memNum}G`,
+        os: 'Windows',
+        flavorName: flavor || defaultFlavor,
+        specStr: `${cpuNum}核/${memNum}G`
+      };
+    }
+
+    // 2. 兼容 "4核8G / 4核/8G / 4vCPU 8GB" 等中文变体写法
+    const cnMatch = (flavor + ' ' + name).match(/(\d+)\s*(?:核|vCPU)\s*[/]?\s*(\d+)\s*(?:G|GB|GiB)/i);
+    if (cnMatch) {
+      return {
+        cpu: `${cnMatch[1]}核`,
+        memory: `${cnMatch[2]}G`,
+        os: 'Windows',
+        flavorName: flavor || defaultFlavor,
+        specStr: `${cnMatch[1]}核/${cnMatch[2]}G`
+      };
+    }
+
+    // 3. 按官方套餐版本名智能映射 (ctyun-pro 同款策略)
+    let spec = '8C16G'; // 默认为 8C16G (ctyun-pro 同款兜底)
+    if (name.includes('旗舰版') || flavor.includes('旗舰版')) spec = '16C32G';
+    else if (name.includes('尊享版') || flavor.includes('尊享版') || name.includes('精英版') || flavor.includes('精英版')) spec = '8C16G';
+    else if (name.includes('标准版') || flavor.includes('标准版')) spec = '4C8G';
+    else if (name.includes('政企') || flavor.includes('政企') || item.isPool || item.objType === 1) spec = '8C16G';
+
+    const cpuNum = spec.match(/^(\d+)C/)[1];
+    const memNum = spec.match(/C(\d+)G/)[1];
+
+    return {
+      cpu: `${cpuNum}核`,
+      memory: `${memNum}G`,
+      os: 'Windows',
+      flavorName: flavor || defaultFlavor,
+      specStr: `${cpuNum}核/${memNum}G`
+    };
+  }
+
   // 解析天翼云全形态云电脑列表 (普通独立单机、政企桌面池 POOL、抢占式桌面)
   static parseAllDesktops(data = {}) {
     const list = [];
@@ -687,6 +857,7 @@ class CtYunClient {
         const id = String(item.desktopId || item.objId || '');
         if (id && !seen.has(id)) {
           seen.add(id);
+          const spec = CtYunClient.extractDesktopSpecs(item, '公众版');
           list.push({
             desktopId: id,
             objId: String(item.objId || id),
@@ -695,7 +866,11 @@ class CtYunClient {
             useStatusText: item.useStatusText || item.useStatus || '运行中',
             useStatus: item.useStatus,
             imageName: item.imageName || '',
-            flavorName: item.flavorName || item.prodGroupName || '',
+            flavorName: spec.flavorName,
+            cpu: spec.cpu,
+            memory: spec.memory,
+            os: spec.os,
+            specStr: spec.specStr,
             objType: item.objType ?? 0,
             isPool: false
           });
@@ -710,6 +885,7 @@ class CtYunClient {
         const id = String(item.desktopId || poolId);
         if (id && !seen.has(id)) {
           seen.add(id);
+          const spec = CtYunClient.extractDesktopSpecs(item, '政企版');
           list.push({
             desktopId: id,
             objId: poolId,
@@ -718,7 +894,11 @@ class CtYunClient {
             useStatusText: item.useStatusText || item.useStatus || '运行中',
             useStatus: item.useStatus,
             imageName: item.imageName || '',
-            flavorName: item.flavorName || item.prodGroupName || '政企版',
+            flavorName: spec.flavorName,
+            cpu: spec.cpu,
+            memory: spec.memory,
+            os: spec.os,
+            specStr: spec.specStr,
             objType: item.objType ?? 1,
             isPool: true
           });
@@ -732,6 +912,7 @@ class CtYunClient {
         const id = String(item.desktopId || item.objId || '');
         if (id && !seen.has(id)) {
           seen.add(id);
+          const spec = CtYunClient.extractDesktopSpecs(item, '抢占式');
           list.push({
             desktopId: id,
             objId: id,
@@ -740,7 +921,11 @@ class CtYunClient {
             useStatusText: item.useStatusText || item.useStatus || '运行中',
             useStatus: item.useStatus,
             imageName: item.imageName || '',
-            flavorName: item.flavorName || item.prodGroupName || '',
+            flavorName: spec.flavorName,
+            cpu: spec.cpu,
+            memory: spec.memory,
+            os: spec.os,
+            specStr: spec.specStr,
             objType: item.objType ?? 2,
             isPool: false
           });
@@ -845,7 +1030,10 @@ class CtYunClient {
         if (!logRes.success) throw new Error(logRes.error);
       }
 
-      // 1. 优先使用全规格 pageDesktop 查询云电脑 (支持独立机、池化及抢占式)
+      const mergedList = [];
+      const seenIds = new Set();
+
+      // 1. 全规格 pageDesktop 查询云电脑 (支持独立机、池化及抢占式)
       try {
         const res = await fetchWithTimeout('https://desk.ctyun.cn:8810/api/desktop/client/pageDesktop', {
           method: 'POST',
@@ -857,16 +1045,18 @@ class CtYunClient {
         });
         const json = await res.json();
         if (json.code === 0 && json.data) {
-          const list = CtYunClient.parseAllDesktops(json.data);
-          if (list.length > 0) {
-            this.desktopsCache = list;
-            for (const d of list) this.checkExternalPowerOn(d);
-            return list;
+          const list1 = CtYunClient.parseAllDesktops(json.data);
+          for (const d of list1) {
+            const id = String(d.desktopId || d.objId || '');
+            if (id && !seenIds.has(id)) {
+              seenIds.add(id);
+              mergedList.push(d);
+            }
           }
         }
       } catch (e) {}
 
-      // 2. 官方备用兜底接口：api/desktop/client/list (覆盖所有自建、公有池与专属云电脑类型)
+      // 2. 官方备用接口合并：api/desktop/client/list (覆盖所有自建、公有池与专属云电脑类型)
       try {
         const resList = await fetchWithTimeout('https://desk.ctyun.cn:8810/api/desktop/client/list', {
           method: 'GET',
@@ -874,21 +1064,29 @@ class CtYunClient {
         });
         const jsonList = await resList.json();
         if (jsonList.code === 0 && jsonList.data) {
-          const list = CtYunClient.parseAllDesktops(jsonList.data);
-          if (list.length > 0) {
-            this.desktopsCache = list;
-            for (const d of list) this.checkExternalPowerOn(d);
-            return list;
+          const list2 = CtYunClient.parseAllDesktops(jsonList.data);
+          for (const d of list2) {
+            const id = String(d.desktopId || d.objId || '');
+            if (id && !seenIds.has(id)) {
+              seenIds.add(id);
+              mergedList.push(d);
+            }
           }
         }
       } catch (e) {}
+
+      if (mergedList.length > 0) {
+        this.desktopsCache = mergedList;
+        for (const d of mergedList) this.checkExternalPowerOn(d);
+        return mergedList;
+      }
 
       // 若未查询到，强制刷新凭据重试一次
       if (attempt === 1) {
         this.loginInfo = null;
       }
     }
-    return [];
+    return this.desktopsCache || [];
   }
 
   async connect(desktopId, vdCommand = '') {
@@ -1044,8 +1242,8 @@ class CtYunClient {
       const data = await sendOperate(opType);
       if (data.code === 0) {
         appendLog('System', `[${accName}] ✅ 云电脑【${actionCn}】指令已成功生效！官方返回: 成功`, 'success');
-        sendNotification(
-          appConfig.settings,
+        sendAccountNotification(
+          this.account,
           `⚡ 云电脑电源控制生效 - ${accName}`,
           `已成功向云电脑 [${accName}] 下达【${actionCn}】电源指令，天翼云已确认执行。`
         );
@@ -1182,19 +1380,357 @@ class CtYunClient {
     this.metrics.status = 'offline';
   }
 
+  // 单台云电脑视讯通道保活会话
+  async runDesktopKeepAliveSession(desktop, isHangMode = false, pulseConnectSec = 20) {
+    const accName = this.account.name || this.account.user;
+    const desktopId = desktop.objId || desktop.desktopId;
+    const desktopName = desktop.objName || desktop.desktopName || '云电脑';
+
+    let desktopInfo = null;
+    let lastConnError = '';
+    for (let connAttempt = 1; connAttempt <= 4; connAttempt++) {
+      try {
+        desktopInfo = await this.connect(desktopId);
+      } catch (e) {
+        lastConnError = e.message || '';
+      }
+      if (desktopInfo && desktopInfo.clinkLvsOutHost) break;
+      if (lastConnError.includes('其他设备') || lastConnError.includes('其他地方') || lastConnError.includes('正在使用') ||
+          lastConnError.includes('占用') || lastConnError.includes('稍后再试') || lastConnError.includes('使用中')) {
+        appendLog('KeepAlive', `[${accName}][${desktopName}] 官方客户端可能正在使用，旁观通道将在下个周期自动重试。`, 'info');
+        return { success: true, reason: 'occupied' };
+      }
+      if (connAttempt < 4) {
+        await new Promise(r => setTimeout(r, 4000));
+      }
+    }
+
+    if (!desktopInfo || !desktopInfo.clinkLvsOutHost) {
+      appendLog('KeepAlive', `[${accName}][${desktopName}] 视讯网关暂未分配完毕，跳过本次连接`, 'warning');
+      return { success: false, reason: 'no_gateway' };
+    }
+
+    this.metrics.currentHost = desktopInfo.clinkLvsOutHost;
+    const wsUrl = `wss://${desktopInfo.clinkLvsOutHost}/clinkProxy/${desktopId}/MAIN`;
+
+    return await new Promise((resolveSession) => {
+      let cycleDone = false;
+      let isClosingSelf = false;
+      let sessionTimeout = null;
+      let hangCheckInterval = null;
+      let wsConnectedAt = 0;
+
+      const endSession = (reason) => {
+        if (cycleDone) return;
+        cycleDone = true;
+        isClosingSelf = true;
+        this.endCurrentSession = null;
+        if (sessionTimeout) clearTimeout(sessionTimeout);
+        if (this.countdownTimer) clearInterval(this.countdownTimer);
+        if (this.clinkPingTimer) {
+          clearInterval(this.clinkPingTimer);
+          this.clinkPingTimer = null;
+        }
+        if (hangCheckInterval) {
+          clearInterval(hangCheckInterval);
+          hangCheckInterval = null;
+        }
+        if (this.ws) {
+          try { this.ws.close(); } catch (e) {}
+        }
+        this.wsAlive = false;
+        resolveSession({ success: true, reason });
+      };
+
+      this.endCurrentSession = endSession;
+
+      this.resetCycleTimeout = (newSeconds) => {
+        if (cycleDone) return;
+        if (sessionTimeout) clearTimeout(sessionTimeout);
+        this.metrics.keepAliveSeconds = newSeconds;
+        this.metrics.cycleCountdown = newSeconds;
+        sessionTimeout = setTimeout(() => {
+          appendLog('Heartbeat', `[${accName}][${desktopName}] 周期时间到 (${newSeconds}s)，强制重连刷新天翼云会话...`, 'info');
+          endSession('Timeout Reset');
+        }, newSeconds * 1000);
+      };
+
+      if (isHangMode) {
+        const maxHangTimeout = 3600;
+        this.metrics.keepAliveSeconds = maxHangTimeout;
+        this.metrics.cycleCountdown = maxHangTimeout;
+        sessionTimeout = setTimeout(() => {
+          appendLog('Heartbeat', `[${accName}][${desktopName}] 挂机长连接看门狗周期到，平滑刷新会话...`, 'info');
+          endSession('Hang Watchdog');
+        }, maxHangTimeout * 1000);
+      } else {
+        const connectSec = Math.min(60, Math.max(15, pulseConnectSec));
+        this.metrics.keepAliveSeconds = connectSec;
+        this.metrics.cycleCountdown = connectSec;
+        sessionTimeout = setTimeout(() => {
+          appendLog('Heartbeat', `[${accName}][${desktopName}] 脉冲握手完成 (${connectSec}s)，释放通道待机...`, 'info');
+          endSession('Pulse Finished');
+        }, connectSec * 1000);
+      }
+
+      if (this.countdownTimer) clearInterval(this.countdownTimer);
+      this.countdownTimer = setInterval(() => {
+        if (this.metrics.cycleCountdown > 0) {
+          this.metrics.cycleCountdown--;
+        }
+      }, 1000);
+
+      this.ws = new WebSocket(wsUrl, {
+        headers: { Origin: 'https://pc.ctyun.cn' },
+        rejectUnauthorized: false
+      });
+
+      const safeSend = (data) => {
+        try {
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(data);
+          }
+        } catch (err) {
+          appendLog('Heartbeat', `[${accName}][${desktopName}] 报文发送异常: ${err.message}`, 'warning');
+        }
+      };
+
+      this.ws.on('open', () => {
+        wsConnectedAt = Date.now();
+        this.sessionConflictStreak = 0;
+        this.conflictRetryUntil = 0;
+        this.wsAlive = true;
+        this.metrics.status = 'online';
+        this.metrics.successCount++;
+        this.account.stats = this.account.stats || {};
+        this.account.stats.keepAliveStatus = 'online';
+        saveConfig(appConfig);
+
+        appendLog('Heartbeat', `[${accName}][${desktopName}] 🟢 保活长连接就绪 (${this.metrics.currentHost})`, 'success');
+
+        const hostParts = (desktopInfo.clinkLvsOutHost || '').split(':');
+        const connectMsg = {
+          type: 1,
+          ssl: 1,
+          host: hostParts[0],
+          port: hostParts[1] || '443',
+          ca: desktopInfo.caCert,
+          cert: desktopInfo.clientCert,
+          key: desktopInfo.clientKey,
+          servername: desktopInfo.host + ':' + desktopInfo.port,
+          oqs: 0
+        };
+        safeSend(JSON.stringify(connectMsg));
+
+        setTimeout(() => {
+          const initBuf = Buffer.from('UkVEUQIAAAACAAAAGgAAAAAAAAABAAEAAAABAAAAEgAAAAkAAAAECAAA', 'base64');
+          safeSend(initBuf);
+          appendLog('Heartbeat', `[${accName}][${desktopName}] 已发送保活特征码报文 (UkVEUQIA...)`, 'info');
+        }, 500);
+      });
+
+      this.ws.on('message', (data) => {
+        try {
+          const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+          const hex = buf.toString('hex').toUpperCase();
+
+          this.wsAlive = true;
+          this.metrics.status = 'online';
+          if (this.account.stats) this.account.stats.keepAliveStatus = 'online';
+
+          if (hex.startsWith('52454451')) {
+            const nowStr = getBeijingTimeOnly();
+            appendLog('Heartbeat', `[${accName}][${desktopName}] 收到服务端保活校验 REDQ (${buf.length}B)`, 'info');
+
+            const responseBuf = this.encryptor.execute(buf);
+            safeSend(responseBuf);
+
+            this.metrics.lastHeartbeatTime = nowStr;
+            this.metrics.lastHeartbeatResult = `[${desktopName}] REDQ 校验成功，已回传 ${responseBuf.length} 字节加密应答 (${nowStr})`;
+            appendLog('Heartbeat', `[${accName}][${desktopName}] -> ✅ 成功回传 RSA-OAEP 加密应答 (${responseBuf.length}B)`, 'success');
+            return;
+          }
+
+          if (buf.length >= 6) {
+            const type = buf.readUInt16LE(0);
+            const size = buf.readUInt32LE(2);
+
+            if (type === 4) {
+              const pongBuf = Buffer.alloc(6 + Math.min(size, 12));
+              pongBuf.writeUInt16LE(3, 0);
+              pongBuf.writeUInt32LE(Math.min(size, 12), 2);
+              if (size > 0 && buf.length >= 6 + Math.min(size, 12)) {
+                buf.copy(pongBuf, 6, 6, 6 + Math.min(size, 12));
+              }
+              safeSend(pongBuf);
+              return;
+            }
+
+            if (type === 3 && size >= 8) {
+              const gen = buf.readUInt32LE(6);
+              const ackBuf = Buffer.alloc(10);
+              ackBuf.writeUInt16LE(1, 0);
+              ackBuf.writeUInt32LE(4, 2);
+              ackBuf.writeUInt32LE(gen, 6);
+              safeSend(ackBuf);
+              return;
+            }
+
+            if (type === 103) {
+              appendLog('Heartbeat', `[${accName}][${desktopName}] 收到云电脑 103 认证，正在上报 118 用户身份...`, 'info');
+              const userPayload = Buffer.from(JSON.stringify({
+                type: 1,
+                userName: this.loginInfo.userName,
+                userInfo: '',
+                userId: this.loginInfo.userId
+              }));
+
+              const sendBuf = Buffer.alloc(2 + 4 + 8 + userPayload.length);
+              sendBuf.writeUInt16LE(118, 0);
+              sendBuf.writeInt32LE(8 + userPayload.length, 2);
+              sendBuf.writeUInt32LE(userPayload.length, 6);
+              sendBuf.writeUInt32LE(8, 10);
+              userPayload.copy(sendBuf, 14);
+
+              safeSend(sendBuf);
+              appendLog('Heartbeat', `[${accName}][${desktopName}] -> ✅ 已回传 118 身份 (用户ID: ${this.loginInfo.userId})，在线状态已激活！`, 'success');
+
+              if (isHangMode) {
+                try {
+                  const sId = desktopInfo.token || '';
+                  const dType = this.deviceType ? String(this.deviceType) : '';
+                  const dCode = this.account.deviceCode || '';
+                  const uAcc = this.loginInfo.userName || '';
+
+                  const sIdLen = Buffer.byteLength(sId, 'utf8') + 1;
+                  const dTypeLen = Buffer.byteLength(dType, 'utf8') + 1;
+                  const dCodeLen = Buffer.byteLength(dCode, 'utf8') + 1;
+                  const uAccLen = Buffer.byteLength(uAcc, 'utf8') + 1;
+
+                  const dataSize = 36 + sIdLen + dTypeLen + dCodeLen + uAccLen;
+                  const dataBuf = Buffer.alloc(dataSize);
+                  let offset = 0;
+                  let strOffset = 36;
+
+                  dataBuf.writeUInt32LE(Number(desktopId), offset); offset += 4;
+                  dataBuf.writeUInt32LE(sIdLen, offset); offset += 4;
+                  dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += sIdLen;
+                  dataBuf.writeUInt32LE(dTypeLen, offset); offset += 4;
+                  dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += dTypeLen;
+                  dataBuf.writeUInt32LE(dCodeLen, offset); offset += 4;
+                  dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += dCodeLen;
+                  dataBuf.writeUInt32LE(uAccLen, offset); offset += 4;
+                  dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += uAccLen;
+
+                  dataBuf.write(sId, offset, 'utf8'); offset += sIdLen;
+                  dataBuf.write(dType, offset, 'utf8'); offset += dTypeLen;
+                  dataBuf.write(dCode, offset, 'utf8'); offset += dCodeLen;
+                  dataBuf.write(uAcc, offset, 'utf8'); offset += uAccLen;
+
+                  const msgBuf112 = Buffer.alloc(6 + dataSize);
+                  msgBuf112.writeUInt16LE(112, 0);
+                  msgBuf112.writeUInt32LE(dataSize, 2);
+                  dataBuf.copy(msgBuf112, 6);
+
+                  safeSend(msgBuf112);
+                } catch (e) {}
+
+                try {
+                  const msgBuf104 = Buffer.alloc(6);
+                  msgBuf104.writeUInt16LE(104, 0);
+                  msgBuf104.writeUInt32LE(0, 2);
+                  safeSend(msgBuf104);
+                } catch (e) {}
+              } else {
+                appendLog('Heartbeat', `[${accName}][${desktopName}] 脉冲旁观者模式已激活：不认领桌面会话 (无 112/104)，官方客户端随时接入永不被踢。`, 'info');
+              }
+
+              if (this.clinkPingTimer) clearInterval(this.clinkPingTimer);
+              this.clinkPingTimer = setInterval(() => {
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                  const hbBuf = Buffer.alloc(6);
+                  hbBuf.writeUInt16LE(7, 0);
+                  hbBuf.writeUInt32LE(0, 2);
+                  safeSend(hbBuf);
+                }
+              }, 5000);
+
+              if (isHangMode) {
+                const checkHangProgress = async () => {
+                  if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+                  await this.refreshOfficialTasks();
+                  const hangTask = this.metrics.officialTasks?.find(t => t.name.includes('使用1小时'));
+                  const curSec = hangTask ? (hangTask.current || 0) : 0;
+                  const totSec = hangTask ? (hangTask.total || 3600) : 3600;
+
+                  if (curSec >= totSec || (hangTask && hangTask.status === 2)) {
+                    if (hangCheckInterval) clearInterval(hangCheckInterval);
+                    appendLog('KeepAlive', `[${accName}][${desktopName}] 🎉 恭喜！今日使用 AI 云电脑 1 小时挂机任务已圆满达成 (+100积分)！后台长连接立即主动让位关闭，转入脉冲保活防休眠模式。`, 'success');
+                    sendAccountNotification(
+                      this.account,
+                      `🎉 挂机1小时任务达成 - ${accName}`,
+                      `账号【${accName}】今日使用 AI 云电脑达到 1 小时任务已完成，100 积分已入账！`
+                    );
+                    endSession('Today Hang Goal Achieved');
+                  } else {
+                    const curMin = Math.floor(curSec / 60);
+                    const totMin = Math.floor(totSec / 60);
+                    const remainSec = Math.max(0, totSec - curSec);
+                    this.metrics.lastHeartbeatResult = `[${desktopName}] 挂机累加中: 已在线 ${curMin}/${totMin} 分钟 (${curSec}/${totSec}秒，剩余约 ${Math.ceil(remainSec / 60)} 分钟)`;
+                    this.metrics.cycleCountdown = remainSec;
+                  }
+                };
+
+                setTimeout(checkHangProgress, 2500);
+                hangCheckInterval = setInterval(checkHangProgress, 15000);
+              } else {
+                this.metrics.lastHeartbeatResult = `[${desktopName}] 脉冲保活握手就绪，已向网关发送 REDQ/心跳`;
+              }
+            }
+
+            if (type === 119 || type === 120 || type === 137) {
+              appendLog('Heartbeat', `[${accName}][${desktopName}] 收到客户端状态通知 (${type})，旁观通道持续待命。`, 'info');
+              return;
+            }
+          }
+        } catch (err) {
+          appendLog('Heartbeat', `[${accName}][${desktopName}] 解析报文异常: ${err.message}`, 'warning');
+        }
+      });
+
+      this.ws.on('error', (err) => {
+        appendLog('Heartbeat', `[${accName}][${desktopName}] 通道异常: ${err.message || '连接受阻'}`, 'error');
+        this.metrics.errorCount++;
+        endSession('Socket Error');
+      });
+
+      this.ws.on('close', (code, reason) => {
+        const reasonStr = String(reason || '');
+        const heldSec = wsConnectedAt ? Math.floor((Date.now() - wsConnectedAt) / 1000) : 0;
+
+        if (isClosingSelf) {
+          appendLog('Heartbeat', `[${accName}][${desktopName}] 保活长连接正常轮转关闭 (${code} - ${reason || '周期重连'})`, 'info');
+        } else if (code >= 4000 || reasonStr.includes('preempt') || reasonStr.includes('kick') || reasonStr.includes('conflict')) {
+          appendLog('Heartbeat', `[${accName}][${desktopName}] 收到网关信令 (${code})，旁观通道随即让位，将按脉冲周期自动重连。`, 'info');
+        } else {
+          appendLog('Heartbeat', `[${accName}][${desktopName}] 旁观通道被网关断开 (状态码: ${code}，已保持 ${heldSec} 秒)，属正常现象，按脉冲周期自动重连。`, 'info');
+        }
+        endSession('Closed');
+      });
+    });
+  }
+
   async runCycleLoop() {
     const accName = this.account.name || this.account.user;
 
     while (this.workerRunning) {
       try {
-        // 只有当用户在界面上手动把保活开关关闭，才退出守护循环
         if (this.account.features?.keepAlive === false) {
-          appendLog('KeepAlive', `[${accName}] 保活开关已关闭，守护循环退出 (重新开启开关或重启保活即可恢复)。`, 'info');
+          appendLog('KeepAlive', `[${accName}] 保活开关已关闭，守护循环退出。`, 'info');
           this.stopKeepAliveWorker();
           break;
         }
 
-        // 如果凭证已完全失效，停止无效重连死循环，等待用户在 Web 界面重新输入验证码登录
         if (this.account.sessionExpired || !this.loginInfo) {
           this.metrics.status = 'offline';
           this.metrics.lastHeartbeatResult = '⚠️ 登录会话已过期，请在卡片点击【重新验证】输入验证码！';
@@ -1203,7 +1739,6 @@ class CtYunClient {
           continue;
         }
 
-        // 若当前用户正在通过网页浏览器直连操控云电脑，后台保活保持静默避让，绝不建连争抢 Session！
         if (this.isWebUserActive) {
           if (Date.now() < this.webUserActiveUntil) {
             this.metrics.status = 'online';
@@ -1215,9 +1750,7 @@ class CtYunClient {
           }
         }
 
-        // 旁观者通道无需任何避让等待：断开即结束本周期，直接按脉冲间隔进入下一轮
-
-        // 1. 查询云电脑当前最新状态
+        // 1. 查询名下全部云电脑
         const desktops = await this.getDesktops();
         if (!desktops || desktops.length === 0) {
           appendLog('KeepAlive', `[${accName}] 账号名下暂无可用云电脑，60秒后重试...`, 'warning');
@@ -1227,59 +1760,31 @@ class CtYunClient {
           continue;
         }
 
-        const desktop = desktops[0];
-        const desktopId = desktop.objId || desktop.desktopId;
-        this.metrics.desktopId = desktopId;
-        this.metrics.desktopName = desktop.objName || desktop.desktopName || '云电脑';
-        if (this.account.stats) this.account.stats.desktopId = desktopId;
-
-        const isRunning = desktop && (desktop.useStatusText === '运行中' || desktop.useStatus == 25);
-
-        // 2. 未运行处理：区分"用户主动关机"与"天翼云闲置自动休眠"，非主动关机一律自动唤醒！
-        if (!isRunning) {
-          if (!this.account.manualShutdown) {
-            // 天翼云断开连接1小时后会自动休眠/关机，此处通过官方多重信令 (operationType: 1/18/connect) 自动唤醒
-            this.metrics.status = 'offline';
-            const isDormant = (desktop.useStatusText || '').includes('休眠') || (desktop.useStatusText || '').includes('睡眠');
-            const actionTarget = isDormant ? 'awake' : 'poweron';
-            const actionCn = isDormant ? '唤醒' : '开机';
-            this.metrics.lastHeartbeatResult = `云电脑 [${desktop.useStatusText || '未启动'}]，正在自动下发${actionCn}...`;
-            appendLog('KeepAlive', `[${accName}] 检测到云电脑处于 [${desktop.useStatusText || '未启动'}] 状态 (天翼云闲置自动休眠机制)，正在自动下发${actionCn}指令...`, 'info');
-
-            const wakeRes = await this.controlPower(desktopId, actionTarget);
-            if (wakeRes && wakeRes.success) {
-              appendLog('KeepAlive', `[${accName}] ✅ 云电脑【${actionCn}】指令已成功送达天翼云网关，等待启动就绪 (30秒后探测)...`, 'success');
-            } else {
-              appendLog('KeepAlive', `[${accName}] ❌ 云电脑【${actionCn}】指令下发失败: ${wakeRes?.error || '网关未确认'}，30秒后重试`, 'warning');
+        // 2. 遍历名下所有云电脑，检查开机/休眠状态并自动唤醒未启动机器 (多机全量守护)
+        let hasWokenAny = false;
+        for (const d of desktops) {
+          const isRunning = d && (d.useStatusText === '运行中' || d.useStatus == 25);
+          const dId = d.objId || d.desktopId;
+          const dName = d.objName || d.desktopName || '云电脑';
+          if (!isRunning) {
+            if (!this.account.manualShutdown) {
+              const isDormant = (d.useStatusText || '').includes('休眠') || (d.useStatusText || '').includes('睡眠');
+              const actionTarget = isDormant ? 'awake' : 'poweron';
+              const actionCn = isDormant ? '唤醒' : '开机';
+              appendLog('KeepAlive', `[${accName}][${dName}] 处于 [${d.useStatusText || '未启动'}] 状态，自动下发${actionCn}指令...`, 'info');
+              await this.controlPower(dId, actionTarget).catch(() => {});
+              hasWokenAny = true;
             }
-            await new Promise(r => setTimeout(r, 30000));
-            continue;
           }
-
-          // 用户主动关机：尊重用户意愿不唤醒，仅保持持久监测
-          // 前 5 分钟每隔 20 秒高频监测一次；5 分钟后转为 10 分钟一次持久巡检，随时响应外部开机自启！
-          this.metrics.status = 'offline';
-          this.metrics.lastHeartbeatResult = `云电脑处于 [${desktop.useStatusText || '未启动'}] 状态 (主动关机)，后台持续监测中...`;
-
-          this.bootWaitStartTime = this.bootWaitStartTime || Date.now();
-          const elapsedSec = Math.floor((Date.now() - this.bootWaitStartTime) / 1000);
-
-          if (elapsedSec < 300) {
-            appendLog('KeepAlive', `[${accName}] 云电脑处于 [${desktop.useStatusText || '未启动'}] 状态 (主动关机)，以 20s 频率持续监测 (${elapsedSec}s/300s)...`, 'info');
-            await new Promise(r => setTimeout(r, 20000));
-          } else {
-            appendLog('KeepAlive', `[${accName}] 云电脑未启动，进入长效持久监测守护 (每 10 分钟探测一次，随时响应外部开机)...`, 'info');
-            await new Promise(r => setTimeout(r, 600000));
-          }
+        }
+        if (hasWokenAny) {
+          appendLog('KeepAlive', `[${accName}] 已为名下未启动云电脑下发唤醒开机指令，等待启动就绪 (25秒后探测)...`, 'info');
+          await new Promise(r => setTimeout(r, 25000));
           continue;
         }
 
-        // 3. 云电脑已处于运行中，重置启动等待计时
+        // 3. 运行中云电脑保活
         this.bootWaitStartTime = null;
-
-        // 智能分时保活决策：
-        // 只有当用户显式开启了该账号的【云电脑挂机1小时】(cloudHang === true) 且今日尚未达标时，才进入持续连线挂机模式；
-        // 否则（关闭了挂机开关，或者今日已满1小时），一律进入【脉冲防休眠模式】（只短暂连接后休眠 pulseIntervalMinutes 分钟，通道空闲不影响官方客户端）
         const isCloudHangEnabled = this.account.features?.cloudHang === true;
         const todayHangDone = this.isTodayHangTaskCompleted();
         const isHangMode = isCloudHangEnabled && !todayHangDone;
@@ -1287,416 +1792,67 @@ class CtYunClient {
         this.metrics.status = 'online';
         if (this.account.stats) this.account.stats.keepAliveStatus = 'online';
 
-        const keepSeconds = appConfig.settings?.keepAliveSeconds || 60;
-        this.metrics.keepAliveSeconds = keepSeconds;
-        const modeLabel = isHangMode ? '持续挂机累加模式' : (todayHangDone ? '今日任务已达标 · 脉冲防休眠模式' : '未开启挂机 · 脉冲防休眠模式');
-        appendLog('Heartbeat', `[${accName}] === 新保活周期开始 (${modeLabel}，连接保持: ${keepSeconds}秒) ===`, 'info');
+        // 挂机模式 (isHangMode)：优先在第一台主机器累加 1 小时时长，同时对名下其余运行中的机器执行脉冲保活
+        if (isHangMode) {
+          const mainDesktop = desktops[0];
+          this.metrics.desktopId = mainDesktop.objId || mainDesktop.desktopId;
+          this.metrics.desktopName = mainDesktop.objName || mainDesktop.desktopName || '云电脑';
 
-        // 4. 获取长连接视讯流配置 (开机后网关就绪可能有轻微延迟，温和重试多次)
-        let desktopInfo = null;
-        let lastConnError = '';
-        for (let connAttempt = 1; connAttempt <= 5; connAttempt++) {
-          try {
-            desktopInfo = await this.connect(desktopId);
-          } catch (e) {
-            lastConnError = e.message || '';
-          }
-          if (desktopInfo && desktopInfo.clinkLvsOutHost) break;
-          // 官方占用语义提示：旁观通道不认领会话，即使被占用也仅记录，下个脉冲周期自动重试
-          if (lastConnError.includes('其他设备') || lastConnError.includes('其他地方') || lastConnError.includes('正在使用') ||
-              lastConnError.includes('占用') || lastConnError.includes('稍后再试') || lastConnError.includes('使用中')) {
-            this.metrics.status = 'online';
-            this.metrics.lastHeartbeatResult = '官方客户端可能正在使用，旁观通道将在下个脉冲周期自动重试';
-            appendLog('KeepAlive', `[${accName}] connect 探测提示占用 (${lastConnError})，旁观通道将在下个脉冲周期自动重试。`, 'info');
-            break;
-          }
-          if (connAttempt < 5) {
-            appendLog('KeepAlive', `[${accName}] 云电脑已开机，视讯网关就绪排队中 (${connAttempt * 5}s/25s)...`, 'info');
-            await new Promise(r => setTimeout(r, 5000));
-          }
-        }
-
-        if (!desktopInfo || !desktopInfo.clinkLvsOutHost) {
-          if (this.externalYieldUntil && Date.now() < this.externalYieldUntil) {
-            continue;
-          }
-          appendLog('KeepAlive', `[${accName}] 视讯网关暂未分配完毕，20秒后自动重新探测连接...`, 'warning');
-          await new Promise(r => setTimeout(r, 20000));
-          continue;
-        }
-
-        this.metrics.currentHost = desktopInfo.clinkLvsOutHost;
-        const wsUrl = `wss://${desktopInfo.clinkLvsOutHost}/clinkProxy/${desktopId}/MAIN`;
-
-        await new Promise((resolveSession) => {
-          let cycleDone = false;
-          let isClosingSelf = false;
-          let sessionTimeout = null;
-          let hangCheckInterval = null;
-          let wsConnectedAt = 0;
-
-          const endSession = (reason) => {
-            if (cycleDone) return;
-            cycleDone = true;
-            isClosingSelf = true;
-            this.endCurrentSession = null;
-            if (sessionTimeout) clearTimeout(sessionTimeout);
-            if (this.countdownTimer) clearInterval(this.countdownTimer);
-            if (this.clinkPingTimer) {
-              clearInterval(this.clinkPingTimer);
-              this.clinkPingTimer = null;
+          // 对其余机器先发送短暂脉冲保活防休眠
+          for (let i = 1; i < desktops.length; i++) {
+            const otherDesktop = desktops[i];
+            const isOtherRunning = otherDesktop && (otherDesktop.useStatusText === '运行中' || otherDesktop.useStatus == 25);
+            if (isOtherRunning) {
+              await this.runDesktopKeepAliveSession(otherDesktop, false, 15);
             }
-            if (hangCheckInterval) {
-              clearInterval(hangCheckInterval);
-              hangCheckInterval = null;
-            }
-            if (this.ws) {
-              try { this.ws.close(); } catch (e) {}
-            }
-            this.wsAlive = false;
-            resolveSession();
-          };
-
-          this.endCurrentSession = endSession;
-
-          this.resetCycleTimeout = (newSeconds) => {
-            if (cycleDone) return;
-            if (sessionTimeout) clearTimeout(sessionTimeout);
-            this.metrics.keepAliveSeconds = newSeconds;
-            this.metrics.cycleCountdown = newSeconds;
-            sessionTimeout = setTimeout(() => {
-              appendLog('Heartbeat', `[${accName}][${this.metrics.desktopName}] 周期时间到 (${newSeconds}s)，强制重连刷新天翼云会话...`, 'info');
-              endSession('Timeout Reset');
-            }, newSeconds * 1000);
-          };
-
-          if (isHangMode) {
-            // 挂机模式：常驻长连接直至达成，设置长达 3600 秒的看门狗兜底
-            const maxHangTimeout = 3600;
-            this.metrics.keepAliveSeconds = maxHangTimeout;
-            this.metrics.cycleCountdown = maxHangTimeout;
-            sessionTimeout = setTimeout(() => {
-              appendLog('Heartbeat', `[${accName}][${this.metrics.desktopName}] 挂机长连接看门狗周期到，平滑刷新会话...`, 'info');
-              endSession('Hang Watchdog');
-            }, maxHangTimeout * 1000);
-          } else {
-            // 脉冲模式：短暂连接 20 秒后主动释放通道
-            const pulseConnectSec = Math.min(60, Math.max(15, appConfig.settings?.keepAliveSeconds || 20));
-            this.metrics.keepAliveSeconds = pulseConnectSec;
-            this.metrics.cycleCountdown = pulseConnectSec;
-            sessionTimeout = setTimeout(() => {
-              appendLog('Heartbeat', `[${accName}][${this.metrics.desktopName}] 脉冲握手完成 (${pulseConnectSec}s)，释放通道待机...`, 'info');
-              endSession('Pulse Finished');
-            }, pulseConnectSec * 1000);
           }
 
-          if (this.countdownTimer) clearInterval(this.countdownTimer);
-          this.countdownTimer = setInterval(() => {
-            if (this.metrics.cycleCountdown > 0) {
-              this.metrics.cycleCountdown--;
+          // 对主机器执行挂机长连接
+          await this.runDesktopKeepAliveSession(mainDesktop, true, 3600);
+        } else {
+          // 脉冲防休眠模式：依次为名下每一台运行中的云电脑执行脉冲握手保活 (各保持 15~20 秒)
+          const pulseConnectSec = Math.min(60, Math.max(15, appConfig.settings?.keepAliveSeconds || 20));
+
+          for (const d of desktops) {
+            if (!this.workerRunning) break;
+            const isRunning = d && (d.useStatusText === '运行中' || d.useStatus == 25);
+            if (isRunning) {
+              this.metrics.desktopId = d.objId || d.desktopId;
+              this.metrics.desktopName = d.objName || d.desktopName || '云电脑';
+              await this.runDesktopKeepAliveSession(d, false, pulseConnectSec);
             }
-          }, 1000);
+          }
 
-          this.ws = new WebSocket(wsUrl, {
-            headers: { Origin: 'https://pc.ctyun.cn' },
-            rejectUnauthorized: false
-          });
-
-          const safeSend = (data) => {
-            try {
-              if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send(data);
-              }
-            } catch (err) {
-              appendLog('Heartbeat', `[${accName}] 报文发送异常: ${err.message}`, 'warning');
-            }
-          };
-
-          this.ws.on('open', () => {
-            wsConnectedAt = Date.now();
-            this.sessionConflictStreak = 0; // 成功建连即清零冲突退避计数
-            this.conflictRetryUntil = 0;
-            this.wsAlive = true;
-            this.metrics.status = 'online';
-            this.metrics.successCount++;
-            this.account.stats = this.account.stats || {};
-            this.account.stats.keepAliveStatus = 'online';
-            saveConfig(appConfig);
-
-            appendLog('Heartbeat', `[${accName}][${this.metrics.desktopName}] 🟢 保活长连接就绪 (${this.metrics.currentHost})`, 'success');
-
-            const hostParts = (desktopInfo.clinkLvsOutHost || '').split(':');
-            const connectMsg = {
-              type: 1,
-              ssl: 1,
-              host: hostParts[0],
-              port: hostParts[1] || '443',
-              ca: desktopInfo.caCert,
-              cert: desktopInfo.clientCert,
-              key: desktopInfo.clientKey,
-              servername: desktopInfo.host + ':' + desktopInfo.port,
-              oqs: 0
-            };
-            safeSend(JSON.stringify(connectMsg));
-
-            setTimeout(() => {
-              const initBuf = Buffer.from('UkVEUQIAAAACAAAAGgAAAAAAAAABAAEAAAABAAAAEgAAAAkAAAAECAAA', 'base64');
-              safeSend(initBuf);
-              appendLog('Heartbeat', `[${accName}] 已发送保活特征码报文 (UkVEUQIA...)`, 'info');
-            }, 500);
-          });
-
-          this.ws.on('message', (data) => {
-            try {
-              const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
-              const hex = buf.toString('hex').toUpperCase();
-
-              // 收到任一有效业务报文，均确保证书与连接状态为在线
-              this.wsAlive = true;
-              this.metrics.status = 'online';
-              if (this.account.stats) this.account.stats.keepAliveStatus = 'online';
-
-              if (hex.startsWith('52454451')) {
-                const nowStr = getBeijingTimeOnly();
-                appendLog('Heartbeat', `[${accName}][${this.metrics.desktopName}] 收到服务端保活校验 REDQ (${buf.length}B)`, 'info');
-
-                const responseBuf = this.encryptor.execute(buf);
-                safeSend(responseBuf);
-
-                this.metrics.lastHeartbeatTime = nowStr;
-                this.metrics.lastHeartbeatResult = `REDQ 校验成功，已回传 ${responseBuf.length} 字节加密应答 (${nowStr})`;
-                appendLog('Heartbeat', `[${accName}][${this.metrics.desktopName}] -> ✅ 成功回传 RSA-OAEP 加密应答 (${responseBuf.length}B)`, 'success');
-                return;
-              }
-
-              if (buf.length >= 6) {
-                const type = buf.readUInt16LE(0);
-                const size = buf.readUInt32LE(2);
-
-                // 响应服务端 PING (Type 4) -> 自动回传 PONG (Type 3)
-                if (type === 4) {
-                  const pongBuf = Buffer.alloc(6 + Math.min(size, 12));
-                  pongBuf.writeUInt16LE(3, 0); // CLINK_MSGC_PONG = 3
-                  pongBuf.writeUInt32LE(Math.min(size, 12), 2);
-                  if (size > 0 && buf.length >= 6 + Math.min(size, 12)) {
-                    buf.copy(pongBuf, 6, 6, 6 + Math.min(size, 12));
-                  }
-                  safeSend(pongBuf);
-                  return;
-                }
-
-                // 响应服务端 ACK_SYNC (Type 3) -> 回传 Type 1 (CLINK_MSGC_ACK_SYNC)
-                if (type === 3 && size >= 8) {
-                  const gen = buf.readUInt32LE(6);
-                  const ackBuf = Buffer.alloc(10);
-                  ackBuf.writeUInt16LE(1, 0); // CLINK_MSGC_ACK_SYNC = 1
-                  ackBuf.writeUInt32LE(4, 2);
-                  ackBuf.writeUInt32LE(gen, 6);
-                  safeSend(ackBuf);
-                  return;
-                }
-
-                if (type === 103) {
-                  appendLog('Heartbeat', `[${accName}] 收到云电脑 103 认证，正在上报 118 用户身份...`, 'info');
-                  const userPayload = Buffer.from(JSON.stringify({
-                    type: 1,
-                    userName: this.loginInfo.userName,
-                    userInfo: '',
-                    userId: this.loginInfo.userId
-                  }));
-
-                  const sendBuf = Buffer.alloc(2 + 4 + 8 + userPayload.length);
-                  sendBuf.writeUInt16LE(118, 0);
-                  sendBuf.writeInt32LE(8 + userPayload.length, 2);
-                  sendBuf.writeUInt32LE(userPayload.length, 6);
-                  sendBuf.writeUInt32LE(8, 10);
-                  userPayload.copy(sendBuf, 14);
-
-                  safeSend(sendBuf);
-                  appendLog('Heartbeat', `[${accName}] -> ✅ 已回传 118 身份 (用户ID: ${this.loginInfo.userId})，在线状态已激活！`, 'success');
-
-                  // 会话认领分级 (旁观者脉冲保活机制，彻底解决互踢)：
-                  // 仅挂机模式 (isHangMode) 发送 Type 112 (会话凭据认领) + Type 104 (通道挂接) 以累加 1 小时任务时长；
-                  // 脉冲模式为纯旁观者姿态 —— 只握手 + REDQ + 118 身份 + 心跳，绝不认领桌面会话，PC/手机客户端随时接入永不被踢！
-                  if (isHangMode) {
-                    // 核心协议补全 1: 发送 Type 112 (CLINK_MSGC_MAIN_CLIENT_LOGIN_INFO) 会话凭据包
-                    // 官方任务中心正是在此握手点记录终端正式连入云电脑会话并确认「登录AI云电脑」达成！
-                    try {
-                      const sId = desktopInfo.token || '';
-                      const dType = this.deviceType ? String(this.deviceType) : '';
-                      const dCode = this.account.deviceCode || '';
-                      const uAcc = this.loginInfo.userName || '';
-
-                      const sIdLen = Buffer.byteLength(sId, 'utf8') + 1;
-                      const dTypeLen = Buffer.byteLength(dType, 'utf8') + 1;
-                      const dCodeLen = Buffer.byteLength(dCode, 'utf8') + 1;
-                      const uAccLen = Buffer.byteLength(uAcc, 'utf8') + 1;
-
-                      const dataSize = 36 + sIdLen + dTypeLen + dCodeLen + uAccLen;
-                      const dataBuf = Buffer.alloc(dataSize);
-                      let offset = 0;
-                      let strOffset = 36;
-
-                      dataBuf.writeUInt32LE(Number(desktopId), offset); offset += 4;
-                      dataBuf.writeUInt32LE(sIdLen, offset); offset += 4;
-                      dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += sIdLen;
-                      dataBuf.writeUInt32LE(dTypeLen, offset); offset += 4;
-                      dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += dTypeLen;
-                      dataBuf.writeUInt32LE(dCodeLen, offset); offset += 4;
-                      dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += dCodeLen;
-                      dataBuf.writeUInt32LE(uAccLen, offset); offset += 4;
-                      dataBuf.writeUInt32LE(strOffset, offset); offset += 4; strOffset += uAccLen;
-
-                      dataBuf.write(sId, offset, 'utf8'); offset += sIdLen;
-                      dataBuf.write(dType, offset, 'utf8'); offset += dTypeLen;
-                      dataBuf.write(dCode, offset, 'utf8'); offset += dCodeLen;
-                      dataBuf.write(uAcc, offset, 'utf8'); offset += uAccLen;
-
-                      const msgBuf112 = Buffer.alloc(6 + dataSize);
-                      msgBuf112.writeUInt16LE(112, 0); // Type 112
-                      msgBuf112.writeUInt32LE(dataSize, 2);
-                      dataBuf.copy(msgBuf112, 6);
-
-                      safeSend(msgBuf112);
-                    } catch (e) {}
-
-                    // 核心协议补全 2: 发送 Type 104 (CLINK_MSGC_MAIN_ATTACH_CHANNELS) 通道挂接就绪包
-                    try {
-                      const msgBuf104 = Buffer.alloc(6);
-                      msgBuf104.writeUInt16LE(104, 0); // Type 104
-                      msgBuf104.writeUInt32LE(0, 2);
-                      safeSend(msgBuf104);
-                    } catch (e) {}
-                  } else {
-                    appendLog('Heartbeat', `[${accName}] 脉冲旁观者模式已激活：不认领桌面会话 (无 112/104)，官方客户端随时接入永不被踢。`, 'info');
-                  }
-
-                  // 核心协议补全 3: 启动定时 Type 7 (CLINK_MSGC_HEARTBEAT) 双向心跳维持
-                  // 天翼云网关据此计算活跃持续在线秒数，平滑累加挂机 1 小时 (3600秒) 时长！
-                  if (this.clinkPingTimer) clearInterval(this.clinkPingTimer);
-                  this.clinkPingTimer = setInterval(() => {
-                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                      const hbBuf = Buffer.alloc(6);
-                      hbBuf.writeUInt16LE(7, 0); // Type 7
-                      hbBuf.writeUInt32LE(0, 2);
-                      safeSend(hbBuf);
-                    }
-                  }, 5000);
-
-                  // 挂机模式下 (isHangMode)：持续连接累加秒数，每 20 秒巡检一次进度，真正达到 3600 秒 (1小时) 后立即让位
-                  if (isHangMode) {
-                    const checkHangProgress = async () => {
-                      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-                      await this.refreshOfficialTasks();
-                      const hangTask = this.metrics.officialTasks?.find(t => t.name.includes('使用1小时'));
-                      const curSec = hangTask ? (hangTask.current || 0) : 0;
-                      const totSec = hangTask ? (hangTask.total || 3600) : 3600;
-
-                      if (curSec >= totSec || (hangTask && hangTask.status === 2)) {
-                        if (hangCheckInterval) clearInterval(hangCheckInterval);
-                        appendLog('KeepAlive', `[${accName}] 🎉 恭喜！今日使用 AI 云电脑 1 小时挂机任务已圆满达成 (+100积分)！后台长连接立即主动让位关闭，转入脉冲保活防休眠模式。`, 'success');
-                        sendNotification(
-                          appConfig.settings,
-                          `🎉 挂机1小时任务达成 - ${accName}`,
-                          `账号【${accName}】今日使用 AI 云电脑达到 1 小时任务已完成，100 积分已入账！`
-                        );
-                        endSession('Today Hang Goal Achieved');
-                      } else {
-                        const curMin = Math.floor(curSec / 60);
-                        const totMin = Math.floor(totSec / 60);
-                        const remainSec = Math.max(0, totSec - curSec);
-                        this.metrics.lastHeartbeatResult = `挂机累加中: 已在线 ${curMin}/${totMin} 分钟 (${curSec}/${totSec}秒，剩余约 ${Math.ceil(remainSec / 60)} 分钟)`;
-                        this.metrics.cycleCountdown = remainSec;
-                      }
-                    };
-
-                    // 连接后 2.5 秒检查一次，随后每 15 秒持续巡检
-                    setTimeout(checkHangProgress, 2500);
-                    hangCheckInterval = setInterval(checkHangProgress, 15000);
-                  } else {
-                    // 脉冲防休眠模式：不执行挂机时长累加，握手完成后正常维持本周期即可
-                    const pulseReason = todayHangDone ? '今日任务已达标' : '未开启挂机功能';
-                    this.metrics.lastHeartbeatResult = `脉冲保活连接中 (${pulseReason}，握手完成后通道将空闲给官方App)`;
-                  }
-                }
-
-                // 核心协议检测：收到服务端 Type 119 (CLINK_MSG_MAIN_CLIENT_OFFLINE) 等状态通知
-                // 旁观通道不认领会话，收到通知仅记录，无需避让
-                if (type === 119 || type === 120 || type === 137) {
-                  appendLog('Heartbeat', `[${accName}] 收到客户端状态通知 (${type})，旁观通道持续待命 (不影响官方客户端)。`, 'info');
-                  return;
-                }
-              }
-            } catch (err) {
-              appendLog('Heartbeat', `[${accName}] 解析报文异常: ${err.message}`, 'warning');
-            }
-          });
-
-          this.ws.on('error', (err) => {
-            appendLog('Heartbeat', `[${accName}] 通道异常: ${err.message || '连接受阻'}`, 'error');
-            this.metrics.errorCount++;
-            endSession('Socket Error');
-          });
-
-          this.ws.on('close', (code, reason) => {
-            const reasonStr = String(reason || '');
-            const heldSec = wsConnectedAt ? Math.floor((Date.now() - wsConnectedAt) / 1000) : 0;
-
-            // 旁观者通道断开零危害：本通道从不认领桌面会话 (无 112/104)，
-            // 被网关拒接/断开均不影响真实客户端，一律按脉冲周期自动重连，无需任何避让！
-            if (isClosingSelf) {
-              appendLog('Heartbeat', `[${accName}] 保活长连接正常轮转关闭 (${code} - ${reason || '周期重连'})`, 'info');
-            } else if (code >= 4000 || reasonStr.includes('preempt') || reasonStr.includes('kick') || reasonStr.includes('conflict')) {
-              appendLog('Heartbeat', `[${accName}] 收到网关信令 (${code})，旁观通道随即让位，将按脉冲周期自动重连 (不影响官方客户端)。`, 'info');
-            } else {
-              appendLog('Heartbeat', `[${accName}] 旁观通道被网关断开 (状态码: ${code}，已保持 ${heldSec} 秒)，属正常现象，按脉冲周期自动重连。`, 'info');
-            }
-            endSession('Closed');
-          });
-        });
-
-        await this.refreshOfficialTasks();
-
-        // 脉冲模式决策：未开启挂机或挂机已达标时，长连接关闭后进入长时间脉冲休眠 (每 pulseIntervalMinutes 分钟短暂连接一次重置天翼云 1 小时休眠计时器)
-        // 挂机模式：短休 2 秒后立即进入下一轮连接，确保持续不间断挂机累加时长直至满 3600 秒达成！
-        if (!isHangMode) {
-          // 脉冲间隔按秒配置 (10~3300 秒)，兼容旧版"分钟"配置字段
-          const pulseGapSec = Math.min(3300, Math.max(10, parseInt(appConfig.settings?.pulseIntervalSeconds) || (parseInt(appConfig.settings?.pulseIntervalMinutes) ? parseInt(appConfig.settings.pulseIntervalMinutes) * 60 : 30)));
+          // 脉冲休眠间隔
+          const pulseGapSec = Math.min(3300, Math.max(10, parseInt(appConfig.settings?.pulseIntervalSeconds) || 30));
           this.metrics.pulseIntervalSeconds = pulseGapSec;
           let waited = 0;
           while (waited < pulseGapSec && this.workerRunning) {
             if (this.account.sessionExpired) break;
-
-            // 如果用户中途手动开启了【云电脑挂机1小时】，立即跳出脉冲休眠，切入持续挂机模式
             if (this.account.features?.cloudHang === true && !this.isTodayHangTaskCompleted()) {
-              appendLog('KeepAlive', `[${accName}] 检测到用户已开启【云电脑挂机1小时】，立即切入持续连线挂机模式！`, 'info');
+              appendLog('KeepAlive', `[${accName}] 用户开启了【云电脑挂机1小时】，切换至挂机模式！`, 'info');
               break;
             }
-
-            // 页面探针超时未续约 (浏览器异常关闭)，视为已释放
             if (this.isWebUserActive && Date.now() >= this.webUserActiveUntil) {
               this.isWebUserActive = false;
             }
-
-            // 占用检测：浏览器访问中 → 暂停倒计时，其关闭释放后从零重新计时
             if (this.isWebUserActive && Date.now() < this.webUserActiveUntil) {
-              this.metrics.lastHeartbeatResult = '浏览器访问云电脑中，脉冲计时已暂停，将从其关闭断开后重新计算';
+              this.metrics.lastHeartbeatResult = '浏览器用户操作中，脉冲计时已暂停';
               await new Promise(r => setTimeout(r, 5000));
               waited = 0;
               continue;
             }
-
             const remain = pulseGapSec - waited;
             const remainText = remain >= 180 ? `约 ${Math.ceil(remain / 60)} 分钟` : `约 ${remain} 秒`;
             const pulseReason = todayHangDone ? '今日任务已达标' : '未开启挂机功能';
-            this.metrics.lastHeartbeatResult = `🟢 脉冲旁观者待机中 (${pulseReason}，${remainText}后短暂连接，旁观通道永不影响官方App)`;
+            const desktopNamesStr = desktops.map(d => d.objName || d.desktopName).filter(Boolean).join('、');
+            this.metrics.lastHeartbeatResult = `🟢 多机脉冲待机中 (${pulseReason}，名下 ${desktops.length} 台 [${desktopNamesStr}] 均已保活，${remainText}后下一轮脉冲)`;
             await new Promise(r => setTimeout(r, 10000));
             waited += 10;
           }
-        } else {
-          // 挂机模式下：短休 2 秒后立即进入下一轮连接，确保持续不间断挂机累加时长直至满 3600 秒达成！
-          await new Promise(r => setTimeout(r, 2000));
         }
+
+        await this.refreshOfficialTasks();
 
       } catch (err) {
         appendLog('KeepAlive', `[${accName}] 保活异常: ${err.message}，10秒后重试...`, 'error');
@@ -1705,8 +1861,8 @@ class CtYunClient {
         this.account.stats.keepAliveStatus = 'offline';
         saveConfig(appConfig);
 
-        sendNotification(
-          appConfig.settings,
+        sendAccountNotification(
+          this.account,
           `⚠️ 天翼云保活中断告警 - ${accName}`,
           `账号 [${accName}] 的云电脑长连接中断: ${err.message}，守护程序正在自动拉起重试。`
         );
@@ -1721,9 +1877,20 @@ const clientInstances = new Map();
 
 function getClient(acc) {
   if (!clientInstances.has(acc.id)) {
-    const client = new CtYunClient(acc);
-    // 立即执行一次官方任务与积分的精准拉取
-    client.refreshOfficialTasks().catch(() => {});
+    let client;
+    if (acc.platform === 'ydpc') {
+      client = new YdpcClient(acc, {
+        appendLog,
+        sendNotification: sendAccountNotification,
+        saveConfig: () => saveConfig(appConfig)
+      });
+      client.refreshVms().catch(() => {});
+    } else {
+      client = new CtYunClient(acc);
+      // 立即执行一次官方任务与积分及云电脑硬件规格列表的精准拉取
+      client.getDesktops().catch(() => {});
+      client.refreshOfficialTasks().catch(() => {});
+    }
     clientInstances.set(acc.id, client);
   } else {
     clientInstances.get(acc.id).account = acc;
@@ -1733,9 +1900,13 @@ function getClient(acc) {
 
 function initAllKeepAlive() {
   for (const acc of appConfig.accounts) {
-    if (acc.enabled && acc.features?.keepAlive === true) {
+    if (acc.enabled && acc.features?.keepAlive !== false) {
       const client = getClient(acc);
-      client.startKeepAliveWorker();
+      if (acc.platform === 'ydpc') {
+        client.refreshVms().then(() => client.startKeepAliveWorker()).catch(() => {});
+      } else {
+        client.startKeepAliveWorker();
+      }
     }
   }
 }
@@ -1748,7 +1919,29 @@ const taskScheduler = new TaskScheduler({
   getSettings: () => appConfig.settings,
   getClient: (acc) => getClient(acc),
   appendLog: (src, msg, lvl) => appendLog(src, msg, lvl),
-  sendNotification: (settings, title, content) => sendNotification(settings, title, content),
+  sendNotification: (target, title, content, extraVars = {}) => {
+    // 账号级通知：定向推送到账号所有者
+    if (target && target.ownerId) {
+      return sendAccountNotification(target, title, content, extraVars);
+    }
+    // 全局汇总通知：按机主分别派发各自账号的汇总
+    const userMap = new Map();
+    for (const acc of appConfig.accounts || []) {
+      const ownerId = acc.ownerId || 'u_admin';
+      if (!userMap.has(ownerId)) userMap.set(ownerId, []);
+      userMap.get(ownerId).push(acc);
+    }
+    for (const [ownerId, accList] of userMap.entries()) {
+      const owner = (appConfig.users || []).find(u => u.id === ownerId);
+      let targetNotify = owner?.notify;
+      if ((!targetNotify || !targetNotify.enabled) && owner?.role === 'admin') {
+        targetNotify = appConfig.settings?.notify;
+      }
+      if (targetNotify && targetNotify.enabled) {
+        sendNotification({ notify: targetNotify }, title, content, extraVars).catch(() => {});
+      }
+    }
+  },
   saveConfig: () => saveConfig(appConfig)
 });
 setTimeout(() => taskScheduler.start(), 3000);
@@ -1773,17 +1966,19 @@ function serveStatic(res, filePath, contentType) {
       res.end('File Not Found');
     } else {
       let content = data;
-      // 若返回 HTML，动态将当前最新的系统主标题注入模板，杜绝页面刷新时回跳闪烁！
+      // 若返回 HTML，动态将当前最新的系统主标题与副标题注入模板，杜绝页面刷新时回跳闪烁！
       if (contentType.includes('text/html')) {
         let htmlStr = data.toString('utf8');
-        const currentTitle = appConfig.settings?.systemTitle || '天翼云自动化控制中心';
+        const currentTitle = appConfig.settings?.systemTitle || '天翼云/移动云电脑保活签到中心';
+        const currentSubtitle = appConfig.settings?.systemSubtitle || '多账号长连接保活守护 · 多运营商支持 · 每日签到打卡 · 智能挂机';
         htmlStr = htmlStr.replace(/<h1 id="main-system-title">[^<]*<\/h1>/, `<h1 id="main-system-title">${currentTitle}<\/h1>`);
+        htmlStr = htmlStr.replace(/(<p style="font-size: 13px; color: var\(--text-muted\); margin-top: 2px;">)[^<]*(<\/p>)/, `$1${currentSubtitle}$2`);
         htmlStr = htmlStr.replace(/<title>[^<]*<\/title>/, `<title>${currentTitle} - 多账号保活控制台<\/title>`);
         content = Buffer.from(htmlStr, 'utf8');
       }
       res.writeHead(200, {
         'Content-Type': contentType,
-        'Cache-Control': 'no-cache'
+        'Cache-Control': 'no-store, must-revalidate'
       });
       res.end(content);
     }
@@ -2324,6 +2519,29 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 个人修改头像
+  if (req.method === 'POST' && pathname === '/api/auth/change-avatar') {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未登录' }, 401);
+      return;
+    }
+    const body = await parseJsonBody(req);
+    const newAvatar = (body.avatar || '').trim();
+    if (!newAvatar) {
+      jsonResponse(res, { error: '头像内容不能为空' }, 400);
+      return;
+    }
+    const ok = authManager.updateUserAvatar(session.userId, newAvatar);
+    if (ok) {
+      appendLog('Auth', `用户 [${session.username}] 更新了个性化头像: ${newAvatar}`, 'info');
+      jsonResponse(res, { success: true, avatar: newAvatar });
+    } else {
+      jsonResponse(res, { error: '用户不存在' }, 404);
+    }
+    return;
+  }
+
   // 管理员修改自身用户名
   if (req.method === 'POST' && pathname === '/api/auth/change-username') {
     const session = getSessionFromReq(req);
@@ -2350,12 +2568,14 @@ const server = http.createServer(async (req, res) => {
       const accountsCount = appConfig.accounts.filter(a => a.ownerId === session.userId).length;
       jsonResponse(res, {
         isLoggedIn: true,
-        systemTitle: appConfig.settings?.systemTitle || '天翼云自动化控制中心',
+        systemTitle: appConfig.settings?.systemTitle || '天翼云/移动云电脑保活签到中心',
+        systemSubtitle: appConfig.settings?.systemSubtitle || '多账号长连接保活守护 · 多运营商支持 · 每日签到打卡 · 智能挂机',
         user: {
           id: user.id,
           username: user.username,
           role: user.role,
           maxQuota: user.maxQuota,
+          avatar: user.avatar || '',
           accountsCount
         }
       });
@@ -2365,7 +2585,8 @@ const server = http.createServer(async (req, res) => {
         isLoggedIn: false,
         allowRegistration: appConfig.settings?.allowRegistration === true,
         defaultQuota: appConfig.settings?.defaultQuota || 2,
-        systemTitle: appConfig.settings?.systemTitle || '天翼云自动化控制中心'
+        systemTitle: appConfig.settings?.systemTitle || '天翼云/移动云电脑保活签到中心',
+        systemSubtitle: appConfig.settings?.systemSubtitle || '多账号长连接保活守护 · 多运营商支持 · 每日签到打卡 · 智能挂机'
       });
     }
     return;
@@ -2553,10 +2774,31 @@ const server = http.createServer(async (req, res) => {
 
     const enriched = userAccounts.map(acc => {
       const client = getClient(acc);
+      if (acc.platform === 'ydpc') {
+        return {
+          ...acc,
+          platform: 'ydpc',
+          vms: client.metrics?.vms || acc.vms || [],
+          desktops: client.metrics?.vms || acc.vms || [],
+          liveMetrics: client.metrics
+        };
+      }
+      const ctyunDesktops = ((client.desktopsCache && client.desktopsCache.length > 0) ? client.desktopsCache : (acc.desktops || [])).map(d => {
+        const spec = CtYunClient.extractDesktopSpecs(d, d.flavorName || '公众版');
+        return {
+          ...d,
+          cpu: d.cpu || spec.cpu,
+          memory: d.memory || spec.memory,
+          specStr: d.specStr || spec.specStr,
+          flavorName: d.flavorName || spec.flavorName
+        };
+      });
+
       return {
         ...acc,
-        desktops: client.desktopsCache || [],
-        pulseIntervalSeconds: parseInt(appConfig.settings?.pulseIntervalSeconds) || (parseInt(appConfig.settings?.pulseIntervalMinutes) ? parseInt(appConfig.settings.pulseIntervalMinutes) * 60 : 30),
+        platform: 'ctyun',
+        desktops: ctyunDesktops,
+        pulseIntervalSeconds: parseInt(appConfig.settings?.pulseIntervalSeconds) || 30,
         liveMetrics: client.metrics
       };
     });
@@ -2564,7 +2806,152 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 8. 添加账号（包含：必须登录 + 强配额限制 + 真实登录校验）
+  // 7.4 账号自由拖拽排序持久化 API
+  if (req.method === 'POST' && pathname === '/api/accounts/reorder') {
+    const session = getSessionFromReq(req);
+    if (!session) { jsonResponse(res, { error: '未授权' }, 401); return; }
+    const body = await parseJsonBody(req);
+    const orderedIds = body.orderedIds;
+    if (Array.isArray(orderedIds)) {
+      const userAccounts = appConfig.accounts.filter(a => a.ownerId === session.userId);
+      const otherAccounts = appConfig.accounts.filter(a => a.ownerId !== session.userId);
+      const reordered = [];
+      for (const id of orderedIds) {
+        const found = userAccounts.find(a => a.id === id);
+        if (found) reordered.push(found);
+      }
+      for (const a of userAccounts) {
+        if (!reordered.includes(a)) reordered.push(a);
+      }
+      appConfig.accounts = [...otherAccounts, ...reordered];
+      saveConfig(appConfig);
+      jsonResponse(res, { success: true });
+      return;
+    }
+    jsonResponse(res, { error: '参数错误' }, 400);
+    return;
+  }
+
+  // 7.5 移动云测试登录并拉取云电脑列表 API
+  if (req.method === 'POST' && pathname === '/api/ydpc/test-login') {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请先登录后再操作' }, 401);
+      return;
+    }
+    const body = await parseJsonBody(req);
+    const user = (body.user || '').trim();
+    const pwd = (body.password || '').trim();
+    const accountType = body.accountType || 'main';
+
+    if (!user || !pwd) {
+      jsonResponse(res, { error: '手机号/账号与密码不能为空' }, 400);
+      return;
+    }
+
+    try {
+      const soho = new SohoClient({ accountType });
+      const loginData = await soho.login(user, pwd, accountType);
+      const vms = await soho.listCloudPcs();
+      jsonResponse(res, {
+        success: true,
+        userId: loginData.userId,
+        vmsCount: vms.length,
+        vms
+      });
+    } catch (e) {
+      jsonResponse(res, { success: false, error: e.message || '移动云鉴权失败' }, 400);
+    }
+    return;
+  }
+
+  // 7.6 添加移动云电脑账号 API
+  if (req.method === 'POST' && pathname === '/api/accounts/ydpc/add') {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请先登录或注册账号后再添加云电脑！' }, 401);
+      return;
+    }
+
+    const currentOwnerId = session.userId;
+    const currentUser = authManager.getUserById(currentOwnerId);
+    if (currentUser && currentUser.role !== 'admin') {
+      const currentOwned = appConfig.accounts.filter(a => a.ownerId === currentOwnerId).length;
+      const userMax = currentUser.maxQuota || 2;
+      if (currentOwned >= userMax) {
+        jsonResponse(res, {
+          error: `已达到云电脑添加配额上限（当前配额: ${userMax}台），无法继续添加！请联系管理员提高配额。`
+        }, 400);
+        return;
+      }
+    }
+
+    const body = await parseJsonBody(req);
+    const user = (body.user || '').trim();
+    const pwd = (body.password || '').trim();
+    const name = (body.name || user).trim();
+    const accountType = body.accountType || 'main';
+    const autoBoot = body.autoBoot !== false;
+    const keepaliveInterval = parseInt(body.keepaliveInterval) || 600;
+
+    if (!user || !pwd) {
+      jsonResponse(res, { error: '账号和密码不能为空' }, 400);
+      return;
+    }
+
+    if (appConfig.accounts.some(a => a.platform === 'ydpc' && a.user === user && a.ownerId === currentOwnerId)) {
+      jsonResponse(res, { error: `移动云账号 ${user} 已存在，请勿重复添加！` }, 400);
+      return;
+    }
+
+    try {
+      const soho = new SohoClient({ accountType });
+      await soho.login(user, pwd, accountType);
+      const vms = await soho.listCloudPcs();
+
+      const newAcc = {
+        id: 'yd_' + crypto.randomUUID().substring(0, 8),
+        platform: 'ydpc',
+        ownerId: currentOwnerId,
+        name,
+        user,
+        password: pwd,
+        accountType,
+        keepaliveInterval,
+        enabled: true,
+        features: {
+          keepAlive: true,
+          cagKeepAlive: true,
+          sohoHeartbeat: true,
+          autoBoot
+        },
+        vms,
+        stats: {
+          keepAliveStatus: 'online',
+          lastKeepAliveTime: getBeijingTimeString(),
+          vmStatus: vms[0]?.vmStatus || '未知',
+          durationMode: vms[0]?.durationMode || 'permanent',
+          remainHours: vms[0]?.remainHours || 0,
+          remainText: vms[0]?.remainText || '♾️ 永久使用'
+        },
+        createdAt: new Date().toISOString()
+      };
+
+      appConfig.accounts.push(newAcc);
+      saveConfig(appConfig);
+
+      const client = getClient(newAcc);
+      client.startKeepAliveWorker();
+
+      appendLog('SOHO', `[${name}] 移动云账号添加成功，发现 ${vms.length} 台云主机，已自动启动保活守护`, 'success', name, 'ydpc');
+      jsonResponse(res, { success: true, account: newAcc }, 201);
+    } catch (e) {
+      jsonResponse(res, { error: e.message || '移动云认证失败' }, 400);
+    }
+    return;
+  }
+
+  // 8. 添加天翼云账号（包含：必须登录 + 强配额限制 + 真实登录校验）
   if (req.method === 'POST' && pathname === '/api/accounts') {
     const session = getSessionFromReq(req);
     // 未登录访客严禁添加云电脑！
@@ -2610,7 +2997,7 @@ const server = http.createServer(async (req, res) => {
 
     appendLog('Auth', `正在严格校验天翼云账号密码真实性: ${user} ...`, 'info');
 
-    const tempAccount = { user, password: pwd, deviceCode: devCode };
+    const tempAccount = { user, password: pwd, deviceCode: devCode, platform: 'ctyun' };
     const tempClient = new CtYunClient(tempAccount);
     const logRes = await tempClient.loginWithCaptcha(captchaCode, challengeId, challengeCode);
 
@@ -2627,6 +3014,7 @@ const server = http.createServer(async (req, res) => {
     const id = crypto.randomUUID().substring(0, 8);
     const newAcc = {
       id,
+      platform: 'ctyun',
       ownerId: currentOwnerId,
       name,
       user,
@@ -2709,6 +3097,8 @@ const server = http.createServer(async (req, res) => {
     if (body.name) acc.name = body.name;
     if (body.user) acc.user = body.user;
     if (body.password) acc.password = body.password;
+    if (body.accountType) acc.accountType = body.accountType;
+    if (body.keepaliveInterval) acc.keepaliveInterval = body.keepaliveInterval;
     if (body.deviceCode) acc.deviceCode = body.deviceCode;
     if (body.displayConfig) acc.displayConfig = { ...acc.displayConfig, ...body.displayConfig };
     if (typeof body.enabled === 'boolean') acc.enabled = body.enabled;
@@ -2716,6 +3106,13 @@ const server = http.createServer(async (req, res) => {
     if (body.features) acc.features = { ...acc.features, ...body.features };
     if (body.redeemConfig) acc.redeemConfig = { ...acc.redeemConfig, ...body.redeemConfig };
     if (body.stats) acc.stats = { ...acc.stats, ...body.stats };
+
+    // 移动云电脑：重新同步云主机列表与时长状态
+    if (acc.platform === 'ydpc') {
+      const client = getClient(acc);
+      if (body.accountType) client.sohoClient.accountType = body.accountType;
+      await client.refreshVms().catch(() => {});
+    }
 
     // 用户在界面上明确手动开启了保活开关：解除 manualShutdown 关机阻断
     if (body.features && body.features.keepAlive === true) {
@@ -3125,8 +3522,8 @@ const server = http.createServer(async (req, res) => {
             acc.stats.lastSignTime = now;
             saveConfig(appConfig);
             await client.refreshOfficialTasks();
-            sendNotification(
-              appConfig.settings,
+            sendAccountNotification(
+              acc,
               `✅ 登录打卡达成 - ${acc.name}`,
               `账号【${acc.name}】今日登录AI云电脑任务已完成，100 积分已到账！`
             );
@@ -3142,8 +3539,8 @@ const server = http.createServer(async (req, res) => {
             acc.stats.lastAiChatTime = now;
             saveConfig(appConfig);
             await client.refreshOfficialTasks();
-            sendNotification(
-              appConfig.settings,
+            sendAccountNotification(
+              acc,
               `🤖 AI对话任务达成 - ${acc.name}`,
               `账号【${acc.name}】今日AI智能对话任务已完成，100 积分已入账！`
             );
@@ -3495,8 +3892,8 @@ const server = http.createServer(async (req, res) => {
 
       if (successCount > 0) {
         appendLog('Redeem', `[${acc.name}] 🎉 本次共成功兑换 ${successCount}/${times} 件【${prodName}】！`, 'success');
-        sendNotification(
-          appConfig.settings,
+        sendAccountNotification(
+          acc,
           `🎉 天翼云积分兑换成功 - ${acc.name}`,
           `账号 [${acc.name}] 成功兑换 [${prodName}] x${successCount}，共扣除 ${costPoints * successCount} 积分。`
         );
@@ -3532,8 +3929,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 云电脑电源管理操作 API (开机 / 重启 / 关机)
-  if (req.method === 'POST' && pathname.startsWith('/api/accounts/') && pathname.includes('/power/')) {
+  // 云电脑电源管理操作 API (开机 / 重启 / 关机) —— 支持天翼云与移动云
+  if (req.method === 'POST' && (pathname.startsWith('/api/accounts/') || pathname.startsWith('/api/ydpc/')) && (pathname.includes('/power/') || pathname.includes('/boot'))) {
     const session = getSessionFromReq(req);
     if (!session) {
       jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
@@ -3542,7 +3939,7 @@ const server = http.createServer(async (req, res) => {
 
     const parts = pathname.split('/');
     const accId = parts[3];
-    const action = parts[5]; // poweron / reboot / shutdown
+    const action = parts[5] || 'poweron'; // poweron / reboot / shutdown
     const acc = appConfig.accounts.find(a => a.id === accId);
     if (!acc) {
       jsonResponse(res, { error: '账号不存在' }, 404);
@@ -3554,12 +3951,21 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    const body = await parseJsonBody(req).catch(() => ({}));
     const client = getClient(acc);
     try {
       const actionLower = (action || '').toLowerCase();
-      let desktopId = parsedUrl.searchParams.get('desktopId') || '';
-      
-      // 如果未指定 desktopId，尝试从当前机器列表提取
+      let desktopId = parsedUrl.searchParams.get('desktopId') || body.userServiceId || body.desktopId || '';
+
+      // 移动云电脑电源管理分支
+      if (acc.platform === 'ydpc') {
+        const targetUsid = desktopId || acc.vms?.[0]?.userServiceId || acc.desktops?.[0]?.userServiceId;
+        const resPower = await client.controlPower(targetUsid, actionLower);
+        jsonResponse(res, resPower);
+        return;
+      }
+
+      // 天翼云电脑电源管理分支
       if (!desktopId) {
         try {
           const desktops = await client.getDesktops();
@@ -3580,7 +3986,7 @@ const server = http.createServer(async (req, res) => {
 
       const resPower = await client.controlPower(desktopId, action);
       if (resPower.success) {
-        // 核心联动：如果是用户在电源管理主动关机，自动关闭保活开关并打上主动关机标记，彻底停止保活重连与离线自动唤醒！
+        // 核心联动：如果是用户在电源管理主动关机，自动关闭保活开关并打上主动关机标记
         if (actionLower === 'shutdown' || actionLower === 'poweroff') {
           acc.features = acc.features || {};
           acc.features.keepAlive = false;
@@ -3589,9 +3995,8 @@ const server = http.createServer(async (req, res) => {
           acc.stats.keepAliveStatus = 'offline';
           saveConfig(appConfig);
           client.stopKeepAliveWorker();
-          appendLog('System', `[${acc.name}] 用户主动关机，已自动关闭保活开关，机器将维持关机，杜绝自动唤醒开机。`, 'info');
+          appendLog('System', `[${acc.name}] 用户主动关机，已自动关闭保活开关，机器将维持关机。`, 'info');
         } else if (actionLower === 'poweron' || actionLower === 'start' || actionLower === 'awake') {
-          // 用户在电源管理主动点开机：恢复保活开关与后台长连接，解除主动关机标记
           acc.features = acc.features || {};
           acc.features.keepAlive = true;
           acc.manualShutdown = false;
@@ -3607,16 +4012,54 @@ const server = http.createServer(async (req, res) => {
         jsonResponse(res, resPower, 400);
       }
     } catch (e) {
-      jsonResponse(res, { error: e.message }, 500);
+      jsonResponse(res, { error: e.message }, 400);
     }
     return;
   }
 
-  // 17. 系统全局设置
+  if (req.method === 'POST' && pathname.startsWith('/api/ydpc/') && pathname.includes('/cag-ping')) {
+    const session = getSessionFromReq(req);
+    if (!session) { jsonResponse(res, { error: '未登录' }, 401); return; }
+    const accId = pathname.split('/')[3];
+    const acc = appConfig.accounts.find(a => a.id === accId);
+    if (!acc || !canUserAccessAccount(session, acc)) { jsonResponse(res, { error: '账号不存在或无权操作' }, 403); return; }
+    const body = await parseJsonBody(req);
+    const client = getClient(acc);
+    try {
+      const result = await client.pingCag(body.userServiceId, 3);
+      jsonResponse(res, result);
+    } catch (e) {
+      jsonResponse(res, { error: e.message }, 400);
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && pathname.startsWith('/api/ydpc/') && pathname.includes('/heartbeat')) {
+    const session = getSessionFromReq(req);
+    if (!session) { jsonResponse(res, { error: '未登录' }, 401); return; }
+    const accId = pathname.split('/')[3];
+    const acc = appConfig.accounts.find(a => a.id === accId);
+    if (!acc || !canUserAccessAccount(session, acc)) { jsonResponse(res, { error: '账号不存在或无权操作' }, 403); return; }
+    const body = await parseJsonBody(req);
+    const client = getClient(acc);
+    try {
+      const result = await client.sendHeartbeat(body.userServiceId);
+      jsonResponse(res, result);
+    } catch (e) {
+      jsonResponse(res, { error: e.message }, 400);
+    }
+    return;
+  }
+
+  // 17. 系统全局设置（仅管理员可访问与修改）
   if (req.method === 'GET' && pathname === '/api/settings') {
     const session = getSessionFromReq(req);
     if (!session) {
       jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+    if (session.role !== 'admin') {
+      jsonResponse(res, { error: '权限不足：仅超级管理员可查看全局系统设置' }, 403);
       return;
     }
     jsonResponse(res, appConfig.settings || {});
@@ -3640,8 +4083,9 @@ const server = http.createServer(async (req, res) => {
     // SSRF 防御校验：检查 Webhook 地址合法性
     if (body.notify && body.notify.webhookUrl) {
       const targetUrl = String(body.notify.webhookUrl).trim();
-      if (body.notify.enabled && !isValidWebhookUrl(targetUrl)) {
-        jsonResponse(res, { error: '安全拦截：禁止设置内网/私有IP或非法协议作为 Webhook 推送目标！' }, 400);
+      const channel = body.notify.channel || 'webhook';
+      if (body.notify.enabled && !isValidWebhookTarget(channel, targetUrl)) {
+        jsonResponse(res, { error: '安全拦截：禁止设置内网/私有IP或目标格式非法！' }, 400);
         return;
       }
     }
@@ -3679,6 +4123,84 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 17.5 个人通知偏好设置 API (所有登录用户可用，包含普通用户和管理员)
+  if (req.method === 'GET' && pathname === '/api/user/notify') {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+    const userNotify = authManager.getUserNotify(session.userId) || {
+      enabled: false,
+      channel: 'webhook',
+      webhookUrl: '',
+      customTitleTemplate: '',
+      customContentTemplate: ''
+    };
+    jsonResponse(res, userNotify);
+    return;
+  }
+
+  if (req.method === 'PUT' && pathname === '/api/user/notify') {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+    const body = await parseJsonBody(req);
+    const channel = body.channel || 'webhook';
+    const webhookUrl = String(body.webhookUrl || '').trim();
+    if (body.enabled && webhookUrl && !isValidWebhookTarget(channel, webhookUrl)) {
+      jsonResponse(res, { error: '安全拦截：禁止设置内网/私有IP或目标格式非法！' }, 400);
+      return;
+    }
+    const ok = authManager.updateUserNotify(session.userId, body);
+    if (ok) {
+      appendLog('Auth', `用户 [${session.username}] 更新了个人消息通知配置`, 'info');
+      if (session.role === 'admin') {
+        appConfig.settings.notify = { ...body };
+        saveConfig(appConfig);
+      }
+      jsonResponse(res, { success: true, notify: authManager.getUserNotify(session.userId) });
+    } else {
+      jsonResponse(res, { error: '用户不存在' }, 404);
+    }
+    return;
+  }
+
+  // 17.6 个人通知推送测试 API (所有登录用户可用)
+  if (req.method === 'POST' && pathname === '/api/user/notify/test') {
+    const session = getSessionFromReq(req);
+    if (!session) {
+      jsonResponse(res, { error: '未授权：请登录后再操作' }, 401);
+      return;
+    }
+    const body = await parseJsonBody(req);
+    const channel = body.channel || 'webhook';
+    const testUrl = (body.webhookUrl || '').trim();
+    if (!isValidWebhookTarget(channel, testUrl)) {
+      jsonResponse(res, { success: false, message: '安全拦截：目标地址为内网/私有IP或格式非法，已被系统拒绝！' }, 400);
+      return;
+    }
+    const testSettings = {
+      notify: {
+        enabled: true,
+        channel: channel,
+        webhookUrl: testUrl,
+        customTitleTemplate: body.customTitleTemplate || '',
+        customContentTemplate: body.customContentTemplate || ''
+      }
+    };
+    const resNotify = await sendNotification(
+      testSettings,
+      `天翼云控制中心 - [${session.username}] 个人测试推送`,
+      '这是一条即时测试消息，证明您的专属消息推送通道已成功联通！',
+      { account: '个人专属测试', task: '推送联通测试', status: '成功', points: '100' }
+    );
+    jsonResponse(res, resNotify);
+    return;
+  }
+
   // 18. 测试通知推送 API (严格要求必须登录且为管理员，并做 SSRF 强校验)
   if (req.method === 'POST' && pathname === '/api/notify/test') {
     const session = getSessionFromReq(req);
@@ -3692,9 +4214,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     const body = await parseJsonBody(req);
+    const channel = body.channel || appConfig.settings?.notify?.channel || 'webhook';
     const testUrl = (body.webhookUrl || appConfig.settings?.notify?.webhookUrl || '').trim();
-    if (!isValidWebhookUrl(testUrl)) {
-      jsonResponse(res, { success: false, message: '安全拦截：目标 URL 为内网/本地私有地址或协议非法，已被系统拒绝！' }, 400);
+    if (!isValidWebhookTarget(channel, testUrl)) {
+      jsonResponse(res, { success: false, message: '安全拦截：目标地址为内网/本地私有地址或格式非法，已被系统拒绝！' }, 400);
       return;
     }
 

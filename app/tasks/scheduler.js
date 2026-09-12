@@ -340,10 +340,51 @@ class TaskScheduler {
 
     const summaryResults = [];
 
-    for (const acc of accounts) {
+    // 辅助防风控随机延时：步骤间 2~5 秒离散等待
+    const sleepStepJitter = async (accName, stepName) => {
+      const ms = Math.floor(Math.random() * 3000) + 2000; // 2000ms ~ 5000ms
+      this.appendLog('Scheduler', `[${accName}] 🛡️ [防风控] 任务步骤 (${stepName}) 间随机防抖，等待 ${(ms / 1000).toFixed(1)} 秒...`, 'info');
+      await new Promise(r => setTimeout(r, ms));
+    };
+
+    for (let i = 0; i < accounts.length; i++) {
+      const acc = accounts[i];
       const client = this.getClient(acc);
       const accSummary = { name: acc.name, sign: false, aiChat: false, hang: false };
 
+      // 移动云电脑 (YDPc) 独立调度分支：执行 SOHO 心跳、CAG TCP 握手与关机自动拉起
+      if (acc.platform === 'ydpc') {
+        try {
+          this.appendLog('Scheduler', `[${acc.name}] 正在执行移动云电脑例行保活巡检...`, 'info', acc.name, 'ydpc');
+          if (client.refreshVms) await client.refreshVms();
+          const vms = acc.vms || client.metrics?.vms || [];
+          for (const vm of vms) {
+            if (vm.keepaliveEnabled !== false) {
+              if (acc.features?.autoBoot && vm.vmStatus === '已关机') {
+                this.appendLog('SOHO', `[${acc.name}][${vm.vmName}] 检测到已关机，下发【自动开机守护】...`, 'warning', acc.name, 'ydpc');
+                if (client.bootVm) await client.bootVm(vm.userServiceId).catch(() => {});
+              }
+              if (acc.features?.sohoHeartbeat !== false && client.sendHeartbeat) {
+                await client.sendHeartbeat(vm.userServiceId).catch(() => {});
+              }
+              if (acc.features?.cagKeepAlive !== false && client.pingCag) {
+                await client.pingCag(vm.userServiceId, 3).catch(() => {});
+              }
+            }
+          }
+        } catch (err) {
+          this.appendLog('Scheduler', `[${acc.name}] 移动云保活巡检异常: ${err.message}`, 'error', acc.name, 'ydpc');
+        }
+
+        // 账号间防风控随机退避
+        if (i < accounts.length - 1) {
+          const accountJitterMs = Math.floor(Math.random() * 8000) + 3000;
+          await new Promise(r => setTimeout(r, accountJitterMs));
+        }
+        continue;
+      }
+
+      // 天翼云电脑 (CTYun) 原生调度分支
       // 若用户当前正在通过网页浏览器操控该云电脑，为避免互踢，自动跳过该账号的本次自动化，保持避让！
       if (client?.isWebUserActive) {
         this.appendLog('Scheduler', `[${acc.name}] 用户当前正在浏览器中远程操控云电脑，为避免会话冲突，本次自动化调度主动避让跳过，等用户关闭页面后再继续。`, 'info');
@@ -365,6 +406,7 @@ class TaskScheduler {
           } catch (e) {
             this.appendLog('Sign', `[${acc.name}] 打卡未达标: ${e.message}`, 'error');
           }
+          await sleepStepJitter(acc.name, '打卡 -> AI 对话');
         }
 
         // 3. 原生毫秒级 AI 智能对话 (彻底剔除 Chromium)
@@ -376,6 +418,7 @@ class TaskScheduler {
           } catch (e) {
             this.appendLog('AIChat', `[${acc.name}] AI 对话未达标: ${e.message}`, 'error');
           }
+          await sleepStepJitter(acc.name, 'AI 对话 -> 挂机检测');
         }
 
         // 4. 原生云电脑挂机守护检测
@@ -385,6 +428,9 @@ class TaskScheduler {
             accSummary.hang = (hangRes && hangRes.isCompleted === true);
           } catch (e) {
             this.appendLog('Hang', `[${acc.name}] 挂机状态检测异常: ${e.message}`, 'error');
+          }
+          if (acc.features?.autoRedeem) {
+            await sleepStepJitter(acc.name, '挂机检测 -> 自动兑换');
           }
         }
 
@@ -489,7 +535,7 @@ class TaskScheduler {
                     acc.redeemConfig = rConf;
                     this.saveConfig();
                     this.sendNotification(
-                      this.getSettings(),
+                      acc,
                       `🎉 天翼云自动兑换成功 - ${acc.name}`,
                       `策略: ${reason}\n账号【${acc.name}】成功兑换 ${successCount}/${buyTimes} 件【${rConf.prodName || rConf.prodId}】。`
                     );
@@ -515,7 +561,12 @@ class TaskScheduler {
         this.appendLog('Scheduler', `[${acc.name}] 任务执行链路异常: ${err.message}`, 'error');
       }
 
-      await new Promise(r => setTimeout(r, 1000));
+      // 账号间防风控离散随机退避 (仅在还有下一个账号时等待 5~15 秒)
+      if (i < accounts.length - 1) {
+        const accountJitterMs = Math.floor(Math.random() * 10000) + 5000; // 5000ms ~ 15000ms
+        this.appendLog('Scheduler', `🛡️ [防风控] 账号间执行退避：随机等待 ${(accountJitterMs / 1000).toFixed(1)} 秒后执行下一个账号...`, 'info');
+        await new Promise(r => setTimeout(r, accountJitterMs));
+      }
     }
 
     // 严格判定：只有当所有账号已开启的全部任务（包括挂机满 1 小时）都真正达成时，才标记今日流程圆满完成

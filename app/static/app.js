@@ -5,6 +5,20 @@ let autoScroll = true;
 let eventSource = null;
 let currentUser = null;
 let currentAuthToken = localStorage.getItem("ctyun_auth_token") || "";
+let allReceivedLogs = [];
+let activeLogFilter = 'tasks';
+let activePlatformFilter = 'all'; // 'all' | 'ctyun' | 'ydpc'
+let activeAccountViewTab = 'all'; // 'all' | 'ctyun' | 'ydpc'
+let currentAddPlatform = 'ctyun';  // 'ctyun' | 'ydpc'
+let authMode = "login";
+let cachedPointsDetails = [];
+let activeEditingAccId = null;
+let currentCaptchaChallenge = null;
+let qrPollingTimer = null;
+let currentQrCodeId = '';
+let smsCountdown = 0;
+let currentPowerDesktopId = '';
+let currentPowerAccountDesktops = [];
 
 // 请求包装：自动携带 token
 async function authFetch(url, options = {}) {
@@ -108,22 +122,29 @@ async function checkCurrentUser() {
     const res = await authFetch("/api/auth/me");
     const data = await res.json();
 
-    // 动态同步主标题名称
+    // 动态同步主标题与副标题名称
     if (data.systemTitle) {
       const titleEl = document.getElementById("main-system-title");
       if (titleEl) titleEl.innerText = data.systemTitle;
       document.title = `${data.systemTitle} - 多账号保活控制台`;
+    }
+    if (data.systemSubtitle) {
+      const subtitleEl = document.querySelector(".title-group p");
+      if (subtitleEl) subtitleEl.innerText = data.systemSubtitle;
     }
 
     if (data.isLoggedIn && data.user) {
       currentUser = data.user;
       const isAdmin = currentUser.role === "admin";
       
-      // 更新头像首字母和下拉菜单用户名
-      const initial = (currentUser.username || "A")[0].toUpperCase();
-      if (headerAvatar) headerAvatar.innerText = initial;
+      // 更新头像首字母/个性化头像和下拉菜单用户名
+      const avatarText = currentUser.avatar || (currentUser.username || "A")[0].toUpperCase();
+      if (headerAvatar) headerAvatar.innerText = avatarText;
       if (dropdownUsername) dropdownUsername.innerText = `${currentUser.username} (${isAdmin ? '管理员' : '普通用户'})`;
       if (menuAdminUsers) menuAdminUsers.classList.toggle("hidden", !isAdmin);
+
+      const settingsDropdown = document.getElementById("settings-dropdown-container");
+      if (settingsDropdown) settingsDropdown.classList.toggle("hidden", !isAdmin);
 
       // 未登录按钮隐藏，已登录整组展开
       if (authBtn) authBtn.classList.add("hidden");
@@ -189,11 +210,12 @@ function showToast(message, type = "info") {
   }
   const toast = document.createElement("div");
   toast.className = `toast toast-${type}`;
+  toast.style.whiteSpace = "pre-line"; // 支持换行多排显示
   toast.innerText = message;
   container.appendChild(toast);
   setTimeout(() => {
     toast.remove();
-  }, 4000);
+  }, 4500);
 }
 
 // 模态框辅助
@@ -206,8 +228,6 @@ function closeModal(id) {
 }
 
 // 1. 加载系统统计
-let cachedPointsDetails = [];
-
 async function loadStatus() {
   try {
     const res = await authFetch("/api/status");
@@ -277,8 +297,6 @@ function openPointsDetailModal() {
 }
 
 // 2. 加载多账号列表
-let activeEditingAccId = null;
-
 async function loadAccounts(isSilent = false) {
   try {
     const res = await authFetch("/api/accounts");
@@ -290,141 +308,229 @@ async function loadAccounts(isSilent = false) {
   }
 }
 
-// 渲染账号卡片（包含权限阻断提示、真实官方任务看板与保活详细监视）
-function renderAccounts() {
+function switchAccountViewTab(tab) {
+  activeAccountViewTab = tab;
+  const tabAll = document.getElementById("view-tab-all");
+  const tabCt = document.getElementById("view-tab-ctyun");
+  const tabYd = document.getElementById("view-tab-ydpc");
+  if (tabAll) tabAll.className = tab === 'all' ? 'btn btn-sm btn-primary' : 'btn btn-sm';
+  if (tabCt) tabCt.className = tab === 'ctyun' ? 'btn btn-sm btn-primary' : 'btn btn-sm';
+  if (tabYd) tabYd.className = tab === 'ydpc' ? 'btn btn-sm btn-primary' : 'btn btn-sm';
+  renderAccounts();
+}
+
+// 记录每个卡片各折叠面板的展开/收起状态 (持久化到 localStorage)
+function getDetailsStateKey(accId, panelKey) {
+  return `ctyun_details_${accId}_${panelKey}`;
+}
+
+function isDetailsOpen(accId, panelKey, defaultOpen = true) {
+  const saved = localStorage.getItem(getDetailsStateKey(accId, panelKey));
+  if (saved === null) return defaultOpen;
+  return saved === 'true';
+}
+
+function saveDetailsState(accId, panelKey, isOpen) {
+  localStorage.setItem(getDetailsStateKey(accId, panelKey), String(isOpen));
+}
+
+// 获取当前网格的响应式列数
+function getGridColumns() {
   const container = document.getElementById("accounts-container");
-  container.innerHTML = "";
+  if (!container) return 3;
+  const style = window.getComputedStyle(container);
+  const gridTemplateColumns = style.gridTemplateColumns;
+  if (!gridTemplateColumns || gridTemplateColumns === "none") return 3;
+  const cols = gridTemplateColumns.split(/\s+/).filter(Boolean).length;
+  return Math.max(1, cols);
+}
 
-  // 如果未登录，严格阻断访客查看云电脑信息，只显示登录注册引导
-  if (!currentUser) {
-    container.innerHTML = `
-      <div style="grid-column: 1 / -1; text-align: center; padding: 48px 24px; background: var(--bg-secondary); border-radius: var(--radius); border: 1px dashed var(--border); box-shadow: var(--shadow);">
-        <div style="font-size: 40px; margin-bottom: 12px;">🔒</div>
-        <h3 style="font-size: 17px; font-weight: 700; color: #0f172a; margin-bottom: 8px;">请登录后查看与管理云电脑</h3>
-        <p style="font-size: 13.5px; color: var(--text-muted); max-width: 500px; margin: 0 auto 20px auto;">
-          为保障账号隐私安全与多用户隔离，未登录访客无法查看或添加云电脑。请登录已有账号，或免费注册新账号开启独立后台。
-        </p>
-        <div style="display: flex; gap: 12px; justify-content: center;">
-          <button class="btn btn-primary" onclick="openAuthModal('login')">🔑 立即登录</button>
-          <button class="btn" onclick="openAuthModal('register')">✨ 免费注册新用户</button>
-        </div>
-      </div>
-    `;
-    return;
+// 缓存当前用户的网格插槽布局状态: array of (accId | null)
+function getGridSlotsKey() {
+  const uid = currentUser?.userId || 'u_admin';
+  return `ctyun_grid_slots_${uid}_${activeAccountViewTab}`;
+}
+
+function getFilteredAccounts() {
+  const hasCtyun = (accounts || []).some(a => a.platform === 'ctyun' || !a.platform);
+  const hasYdpc = (accounts || []).some(a => a.platform === 'ydpc');
+  return (accounts || []).filter(acc => {
+    if (!hasCtyun || !hasYdpc) return true; // 单一平台不过滤
+    if (activeAccountViewTab === 'all') return true;
+    if (activeAccountViewTab === 'ctyun') return acc.platform === 'ctyun' || !acc.platform;
+    if (activeAccountViewTab === 'ydpc') return acc.platform === 'ydpc';
+    return true;
+  });
+}
+
+function loadGridSlots(filteredAccs, cols) {
+  const key = getGridSlotsKey();
+  let savedSlots = null;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) savedSlots = JSON.parse(raw);
+  } catch (e) {}
+
+  const currentIds = new Set(filteredAccs.map(a => a.id));
+  let slots = Array.isArray(savedSlots) ? [...savedSlots] : [];
+
+  // 清理不存在于当前过滤列表的无效 ID
+  for (let i = 0; i < slots.length; i++) {
+    if (slots[i] && !currentIds.has(slots[i])) {
+      slots[i] = null;
+    }
   }
 
-  if (!accounts || accounts.length === 0) {
-    container.innerHTML = `
-      <div style="grid-column: 1 / -1; text-align: center; padding: 40px; color: var(--text-muted); background: var(--bg-secondary); border-radius: var(--radius); border: 1px dashed var(--border);">
-        <p style="font-size: 15px; margin-bottom: 12px;">当前账号下暂无配置云电脑</p>
-        <button class="btn btn-primary" onclick="openAddAccountModal()">➕ 立即添加你的第一台云电脑</button>
-      </div>
-    `;
-    return;
+  // 确保所有当前账号都已映射到插槽
+  const placedIds = new Set(slots.filter(Boolean));
+  for (const acc of filteredAccs) {
+    if (!placedIds.has(acc.id)) {
+      const emptyIdx = slots.indexOf(null);
+      if (emptyIdx !== -1) {
+        slots[emptyIdx] = acc.id;
+      } else {
+        slots.push(acc.id);
+      }
+      placedIds.add(acc.id);
+    }
   }
 
-  accounts.forEach(acc => {
-    const card = document.createElement("div");
-    card.className = "account-card";
-
-    const isOnline = acc.stats?.keepAliveStatus === "online" || acc.liveMetrics?.status === "online";
-    const statusBadge = isOnline
-      ? `<span class="badge badge-online">🟢 保活长连接在线</span>`
-      : `<span class="badge badge-offline">⚪ 未连接</span>`;
-
-    let sessionBadge = '';
-    if (acc.sessionExpired) {
-      sessionBadge = `<span class="badge badge-danger" style="cursor:pointer;" onclick="editAccount('${acc.id}')">⚠️ 会话已失效，点击重新验证</span>`;
+  // 计算最后一个实际有卡片占用的插槽索引
+  let lastOccupied = -1;
+  for (let i = slots.length - 1; i >= 0; i--) {
+    if (slots[i] && currentIds.has(slots[i])) {
+      lastOccupied = i;
+      break;
     }
+  }
 
-    const boundBadge = acc.bound
-      ? `<span class="badge" style="background: rgba(22,163,74,0.12); color: #16a34a; border: 1px solid rgba(22,163,74,0.25);">已绑设备</span>`
-      : `<span class="badge badge-warning" style="cursor: pointer;" onclick="openSmsModal('${acc.id}')">⚠️ 待短信绑定</span>`;
+  // 约束总行数：以最高占用行与最少必要行对齐，杜绝末尾凭空多出空行
+  const minRows = Math.ceil(filteredAccs.length / cols);
+  const occupiedRows = lastOccupied >= 0 ? Math.ceil((lastOccupied + 1) / cols) : 0;
+  const totalRows = Math.max(minRows, occupiedRows, 1);
+  const totalSlots = totalRows * cols;
 
-    const maskPhone = acc.user.replace(/(\d{3})\d{4}(\d{4})/, "$1****$2");
-    const devCode = acc.deviceCode || "未生成";
-    const f = acc.features || {};
+  if (slots.length > totalSlots) {
+    slots = slots.slice(0, totalSlots);
+  }
+  while (slots.length < totalSlots) {
+    slots.push(null);
+  }
 
-    const m = acc.liveMetrics || {
-      currentHost: '获取中...',
-      desktopName: '云电脑',
-      cycleCountdown: 60,
-      keepAliveSeconds: 60,
-      lastHeartbeatResult: '未建立会话',
-      successCount: 0,
-      officialTasks: [],
-      userPoints: acc.stats?.points || 0
-    };
+  return slots;
+}
 
-    // 官方任务渲染（温润柔和配色）
-    let officialTaskHtml = '';
-    if (m.officialTasks && m.officialTasks.length > 0) {
-      officialTaskHtml = m.officialTasks.map(t => {
-        const isDone = t.status === 2 || (t.total > 0 && t.current >= t.total);
-        const percent = Math.min(100, Math.round((t.current / (t.total || 1)) * 100));
-        let progressText = `${t.current}/${t.total}`;
-        if (t.name.includes('使用1小时')) {
-          const mins = Math.floor(t.current / 60);
-          progressText = `${mins}分钟 (${t.current}/3600秒)`;
-        }
+function saveGridSlots(slots) {
+  const key = getGridSlotsKey();
+  try {
+    localStorage.setItem(key, JSON.stringify(slots));
+  } catch (e) {}
+}
 
-        return `
-          <div style="background: #ffffff; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); box-shadow: 0 1px 3px rgba(0,0,0,0.02);">
-            <div style="display: flex; justify-content: space-between; font-size: 12.5px; margin-bottom: 6px;">
-              <span>🎯 <b style="color:#0f172a;">${t.name}</b> <span style="color:#2563eb; font-weight:600;">(+${t.points}分)</span></span>
-              <span style="color: ${isDone ? '#16a34a' : '#d97706'}; font-weight: 700;">
-                ${isDone ? '✅ 已达成' : '⏳ ' + progressText}
-              </span>
-            </div>
-            <div style="background: #e2e8f0; height: 6px; border-radius: 4px; overflow: hidden;">
-              <div style="background: ${isDone ? '#16a34a' : '#2563eb'}; width: ${percent}%; height: 100%; transition: width 0.3s ease;"></div>
-            </div>
+function buildOfficialTasksHtml(m) {
+  if (m.officialTasks && m.officialTasks.length > 0) {
+    return m.officialTasks.map(t => {
+      const isDone = t.status === 2 || (t.total > 0 && t.current >= t.total);
+      const percent = Math.min(100, Math.round((t.current / (t.total || 1)) * 100));
+      let progressText = `${t.current}/${t.total}`;
+      if (t.name.includes('使用1小时')) {
+        const mins = Math.floor(t.current / 60);
+        progressText = `${mins}分钟 (${t.current}/3600秒)`;
+      }
+
+      return `
+        <div style="background: #ffffff; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); box-shadow: 0 1px 3px rgba(0,0,0,0.02);">
+          <div style="display: flex; justify-content: space-between; font-size: 12.5px; margin-bottom: 6px;">
+            <span>🎯 <b style="color:#0f172a;">${t.name}</b> <span style="color:#2563eb; font-weight:600;">(+${t.points}分)</span></span>
+            <span style="color: ${isDone ? '#16a34a' : '#d97706'}; font-weight: 700;">
+              ${isDone ? '✅ 已达成' : '⏳ ' + progressText}
+            </span>
           </div>
-        `;
-      }).join('');
-    } else {
-      officialTaskHtml = `<div style="font-size: 12px; color: var(--text-muted); text-align: center; padding: 6px 0;">正在同步天翼云官方任务中心数据...</div>`;
-    }
-
-    // 云电脑设备列表渲染 (支持单账号多台云电脑展示)
-    let desktopsHtml = '';
-    const dList = (acc.desktops && acc.desktops.length > 0) ? acc.desktops : [{
-      desktopId: m.desktopId || acc.stats?.desktopId || '',
-      desktopName: m.desktopName || '天翼云电脑',
-      useStatusText: (acc.stats?.keepAliveStatus === 'online' || m.status === 'online') ? '运行中' : '就绪',
-      flavorName: ''
-    }];
-
-    if (dList.length > 0) {
-      desktopsHtml = `
-        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;">
-          <div style="font-size: 12px; font-weight: 700; color: #334155; margin-bottom: 6px; display: flex; justify-content: space-between;">
-            <span>🖥️ 名下云电脑 (${dList.length}台)</span>
-            <span style="color: #64748b; font-weight: normal;">多设备独立支持</span>
-          </div>
-          <div style="display: flex; flex-direction: column; gap: 6px;">
-            ${dList.map(d => `
-              <div style="display: flex; justify-content: space-between; align-items: center; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px 10px; font-size: 12px; gap: 8px;">
-                <div style="display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; overflow: hidden;">
-                  <span title="${escapeHtml(d.desktopName || '云电脑')}" style="color: #0f172a; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; flex-shrink: 1; cursor: help;">${escapeHtml(d.desktopName || '云电脑')}</span>
-                  ${d.flavorName ? `<span style="font-size: 10.5px; background: #eff6ff; color: #2563eb; padding: 1px 6px; border-radius: 4px; flex-shrink: 0; white-space: nowrap;">${escapeHtml(d.flavorName)}</span>` : ''}
-                </div>
-                <div style="display: flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap;">
-                  <span style="color: ${(d.useStatusText || '').includes('运行') ? '#16a34a' : '#64748b'}; font-weight: 600; flex-shrink: 0; white-space: nowrap; font-size: 11.5px;">
-                    ${(d.useStatusText || '').includes('运行') ? '🟢 ' : '⚪ '}${d.useStatusText || '运行中'}
-                  </span>
-                  <button class="btn btn-sm" style="padding: 2px 7px; font-size: 11px; flex-shrink: 0; white-space: nowrap;" onclick="openPowerModal('${acc.id}', '${d.desktopId}', '${escapeHtml(d.desktopName)}')">⚡ 电源</button>
-                  <button class="btn btn-sm btn-primary" style="padding: 2px 7px; font-size: 11px; flex-shrink: 0; white-space: nowrap;" onclick="launchWebDesktop('${acc.id}', '${d.desktopId}')">🚀 打开</button>
-                </div>
-              </div>
-            `).join('')}
+          <div style="background: #e2e8f0; height: 6px; border-radius: 4px; overflow: hidden;">
+            <div style="background: ${isDone ? '#16a34a' : '#2563eb'}; width: ${percent}%; height: 100%; transition: width 0.3s ease;"></div>
           </div>
         </div>
       `;
+    }).join('');
+  }
+  return `<div style="font-size: 12px; color: var(--text-muted); text-align: center; padding: 6px 0;">正在同步天翼云官方任务中心数据...</div>`;
+}
+
+// 构造单个账号卡片 DOM 节点
+function buildAccountCardElement(acc, slotIndex) {
+  const card = document.createElement("div");
+  card.className = "account-card";
+  card.id = `acc-card-${acc.id}`;
+  card.dataset.accId = acc.id;
+  card.dataset.slot = slotIndex;
+  card.draggable = true;
+
+  // 绑定 HTML5 原生无损拖拽事件
+  card.addEventListener("dragstart", handleCardDragStart);
+  card.addEventListener("dragover", handleCardDragOver);
+  card.addEventListener("dragleave", handleCardDragLeave);
+  card.addEventListener("drop", handleCardDrop);
+  card.addEventListener("dragend", handleCardDragEnd);
+
+  const isYdpc = acc.platform === 'ydpc';
+  const isYdpcRealOnline = isYdpc ? (acc.liveMetrics?.status === "online") : (acc.stats?.keepAliveStatus === "online" || acc.liveMetrics?.status === "online");
+  const statusBadge = isYdpcRealOnline
+    ? `<span class="badge badge-online">保活在线</span>`
+    : `<span class="badge badge-offline">离线待机</span>`;
+
+  const fullPhone = escapeHtml(acc.user);
+  const displayName = acc.name || acc.user;
+  const isEditingThis = (activeEditingAccId === acc.id);
+  const f = acc.features || {};
+  const m = acc.liveMetrics || {};
+
+  if (isYdpc) {
+    // ====================================================
+    // 📱 移动云电脑专属卡片呈现
+    // ====================================================
+    const typeBadge = acc.accountType === 'sub'
+      ? `<span class="badge" style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;">独立子账号</span>`
+      : `<span class="badge" style="background:#fef3c7;color:#b45309;border:1px solid #fde68a;">和家亲主账号</span>`;
+
+    const vms = acc.vms || m.vms || [];
+    const vmsCountText = vms.length > 0 ? `名下云主机 (${vms.length}台)` : '云主机';
+
+    let vmsHtml = '';
+    if (vms.length > 0) {
+      vmsHtml = `
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px;">
+          <div style="font-size: 12px; font-weight: 700; color: #334155; margin-bottom: 6px; display: flex; justify-content: space-between;">
+            <span>🖥️ ${vmsCountText}</span>
+            <span style="color: #64748b; font-weight: normal;">自动识别限时/永久</span>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 6px;">
+            ${vms.map(vm => {
+              const statusStr = String(vm.vmStatus || vm.vmStatusShow || '');
+              const isRunning = statusStr.includes('运行') || vm.vmStatus === 1 || vm.vmStatusCode === 1;
+              const cpuClean = vm.cpu ? String(vm.cpu).replace(/核+$/g, '') : '';
+              const memClean = vm.memory ? String(vm.memory).replace(/[Gg]+$/g, '') : '';
+              const specSuffix = (cpuClean && memClean) ? ` · ${cpuClean}核/${memClean}G` : (cpuClean ? ` · ${cpuClean}核` : (memClean ? ` · ${memClean}G` : ''));
+              return `
+                <div style="display: flex; justify-content: space-between; align-items: center; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; padding: 7px 10px; font-size: 12px; gap: 8px;">
+                  <div style="display: flex; flex-direction: column; min-width: 0; flex: 1;">
+                    <span style="color: #0f172a; font-weight: 700; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${escapeHtml(vm.vmName || '移动云电脑')}</span>
+                    <span style="font-size: 11px; color: #64748b;">USID: ${vm.userServiceId}${specSuffix}</span>
+                  </div>
+                  <div style="display: flex; align-items: center; gap: 6px; flex-shrink: 0;">
+                    <span class="badge ${isRunning ? 'badge-online' : 'badge-offline'}">${isRunning ? '运行中' : '已关机'}</span>
+                    <span style="font-size: 11.5px; font-weight: 600; color: ${vm.durationMode === 'limited' ? '#b45309' : '#059669'};">${vm.remainText || '♾️ 永久'}</span>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `;
+    } else {
+      vmsHtml = `<div style="font-size: 12px; color: var(--text-muted); text-align: center; padding: 8px; background:#f8fafc; border-radius:6px; border:1px solid #e2e8f0;">暂未拉取到名下云主机，点击下方心跳或握手自动同步</div>`;
     }
 
-    const displayName = acc.name || acc.user;
-    const isEditingThis = (activeEditingAccId === acc.id);
+    const primaryUsid = vms[0]?.userServiceId || '';
 
     card.innerHTML = `
       <div class="card-top">
@@ -436,61 +542,238 @@ function renderAccounts() {
                 <span class="name-label" id="acc-name-val-${acc.id}">${escapeHtml(displayName)}</span>
                 <span class="name-edit-icon" title="点击直接修改备注">✏️</span>
               </span>
-              <input type="text" class="inline-name-input ${isEditingThis ? '' : 'hidden'}" id="acc-name-input-${acc.id}" value="${escapeHtml(displayName)}" onkeydown="handleInlineNameKey(event, '${acc.id}')" onblur="saveInlineName('${acc.id}')" maxlength="30" placeholder="账号备注名">
+              <input type="text" class="inline-name-input ${isEditingThis ? '' : 'hidden'}" id="acc-name-input-${acc.id}" value="${escapeHtml(displayName)}" onkeydown="handleInlineNameKey(event, '${acc.id}')" onblur="saveInlineName('${acc.id}')" maxlength="30">
             </div>
             <div class="account-phone">
-              📱 ${maskPhone} &nbsp; ${sessionBadge || boundBadge}
+              <span>${fullPhone}</span>
+              <span class="badge" style="background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;">移动云</span>
+              ${typeBadge}
             </div>
           </div>
         </div>
         <div style="display: flex; gap: 4px;">
-          <button class="btn btn-sm" onclick="editAccount('${acc.id}')" title="编辑账号与重新验证">✏️</button>
+          <button class="btn btn-sm" onclick="editAccount('${acc.id}')" title="编辑移动云账号">✏️</button>
           <button class="btn btn-sm btn-danger" onclick="deleteAccount('${acc.id}')" title="删除账号">🗑️</button>
         </div>
       </div>
 
-      <!-- 设备码 -->
-      <div class="device-box">
-        <div style="display: flex; align-items: center; gap: 6px;">
-          <span style="color: var(--text-muted);">设备:</span>
-          <span class="device-code-text" title="${devCode}">${devCode}</span>
-        </div>
-        <button class="btn btn-sm" onclick="copyToClipboard('${devCode}')">复制</button>
-      </div>
+      <!-- 🖥️ 名下云主机列表 -->
+      ${vmsHtml}
 
-      <!-- 🖥️ 名下云电脑列表 (支持单账号多机器独立管理) -->
-      ${desktopsHtml}
-
-      <!-- 📡 真实 WebSocket 保活心跳状态监视 -->
+      <!-- 📡 移动云专属 CAG 握手与心跳监视 -->
       <div style="background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; font-size: 12px;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-          <span style="color: #2563eb; font-weight: 700;">📡 状态与心跳监视</span>
-          <span style="color: var(--text-muted);">${f.cloudHang && !(m.officialTasks?.find(t => t.name.includes('使用1小时'))?.status === 2) ? `模式: <b style="color:#d97706;">持续挂机累加</b> (剩余: <b style="color:#2563eb;">${m.cycleCountdown || 0}s</b>)` : `脉冲间隔: <b>${acc.pulseIntervalSeconds || 30}s</b> (脉冲倒计时: <b style="color:#16a34a;">${m.cycleCountdown || 30}s</b>)`}</span>
+          <span style="color: #0369a1; font-weight: 700;">📡 移动云 ZTEC 握手与心跳监视</span>
+          <span id="acc-status-badge-${acc.id}">${statusBadge}</span>
         </div>
         <div style="color: #475569; line-height: 1.8;">
           <div style="display: flex; align-items: baseline; gap: 4px; overflow: hidden; white-space: nowrap;">
-            <span style="flex-shrink: 0;">目标设备:</span>
-            <span title="${escapeHtml(m.desktopName || '云电脑')} (${escapeHtml(m.currentHost || '未连接')})" style="color: #0f172a; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; flex: 1; cursor: help;">${escapeHtml(m.desktopName || '云电脑')} (${escapeHtml(m.currentHost || '未连接')})</span>
-          </div>
-          <div style="display: flex; align-items: baseline; gap: 4px; overflow: hidden; white-space: nowrap;">
             <span style="flex-shrink: 0;">当前动作:</span>
-            <span title="${escapeHtml(m.lastHeartbeatResult || '正在建立心跳通道...')}" style="color: ${(m.lastHeartbeatResult || '').includes('避让') ? '#d97706' : '#16a34a'}; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; flex: 1; cursor: help;">${escapeHtml(m.lastHeartbeatResult || '正在建立心跳通道...')}</span>
+            <span id="acc-hb-text-${acc.id}" title="${escapeHtml(m.lastHeartbeatResult || '保活巡检待命')}" style="color: #0284c7; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; flex: 1; cursor: help;">${escapeHtml(m.lastHeartbeatResult || '保活巡检待命')}</span>
           </div>
-          <div>成功轮次: <span style="color: #2563eb; font-weight: 600;">${m.successCount || 0} 轮</span></div>
+          <div id="acc-active-info-${acc.id}">上次活跃: <span style="color: #0f172a; font-weight: 600;">${m.lastHeartbeatTime || acc.stats?.lastKeepAliveTime || '刚刚'}</span> · 周期: <b>${Math.round((acc.keepaliveInterval || 600) / 60)} 分钟</b></div>
         </div>
       </div>
 
-      <!-- 🏆 天翼云官方真实任务看板 (实时拉取官方数据) -->
-      <div style="display: flex; flex-direction: column; gap: 6px;">
-        <div style="display: flex; justify-content: space-between; align-items: center; font-size: 13px; font-weight: 700;">
-          <span style="color: #b45309;">🏆 官方任务中心实时进度</span>
-          <span style="color: #16a34a;">当前总积分: <b style="font-size:14px;">${m.userPoints || 0}</b></span>
+      <!-- 专属功能开关 (精致折叠设计，状态持久化) -->
+      <details class="features-box" style="padding: 10px 14px;" ${isDetailsOpen(acc.id, 'features') ? 'open' : ''} ontoggle="saveDetailsState('${acc.id}', 'features', this.open)">
+        <summary style="display: flex; justify-content: space-between; align-items: center; cursor: pointer; font-size: 12.5px; font-weight: 700; color: #334155; user-select: none; margin-bottom: 2px;">
+          <span>⚙️ 自动化保活开关</span>
+          <span style="font-size: 11px; color: var(--text-muted); font-weight: normal;">点击收起/展开</span>
+        </summary>
+        <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
+          <div class="feature-row">
+            <span>🛡️ 自动开机守护 (检测到关机自动唤醒)</span>
+            <label class="switch">
+              <input type="checkbox" ${f.autoBoot !== false ? 'checked' : ''} onchange="toggleFeature('${acc.id}', 'autoBoot', this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="feature-row">
+            <span>🔄 ZTEC CAG TCP 三阶段握手保活</span>
+            <label class="switch">
+              <input type="checkbox" ${f.cagKeepAlive !== false ? 'checked' : ''} onchange="toggleFeature('${acc.id}', 'cagKeepAlive', this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="feature-row">
+            <span>💓 SOHO REST 定期心跳保持</span>
+            <label class="switch">
+              <input type="checkbox" ${f.sohoHeartbeat !== false ? 'checked' : ''} onchange="toggleFeature('${acc.id}', 'sohoHeartbeat', this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
         </div>
+      </details>
+
+      <!-- 快捷操作区 -->
+      <div class="card-actions">
+        <div class="card-action-tools" style="grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));">
+          <button class="btn btn-tool" onclick="bootYdpcVm('${acc.id}', '${primaryUsid}')" title="移动云电脑开机 (支持 SC/ZTE 自适应开机)">🖥️ 开机/唤醒</button>
+          <button class="btn btn-tool" onclick="pingYdpcCag('${acc.id}')" title="立即向中兴 CAG 发起 TCP 握手保活">🔄 CAG 握手</button>
+          <button class="btn btn-tool" onclick="heartbeatYdpc('${acc.id}')" title="立即发送一次 SOHO 活跃心跳">💓 发送心跳</button>
+        </div>
+      </div>
+    `;
+
+    return card;
+  }
+
+  // ====================================================
+  // ☁️ 天翼云电脑专属卡片呈现
+  // ====================================================
+  let sessionBadge = '';
+  if (acc.sessionExpired) {
+    sessionBadge = `<span class="badge badge-danger" style="cursor:pointer;" onclick="editAccount('${acc.id}')">⚠️ 会话失效</span>`;
+  }
+
+  const boundBadgeHtml = acc.bound
+    ? `<span class="badge badge-online">已绑设备</span>`
+    : `<span class="badge badge-warning" style="cursor: pointer;" onclick="openSmsModal('${acc.id}')">⚠️ 待绑定</span>`;
+
+  const officialTaskHtml = buildOfficialTasksHtml(m);
+
+  // 云电脑设备列表渲染
+  let desktopsHtml = '';
+  const dList = (acc.desktops && acc.desktops.length > 0) ? acc.desktops : [{
+    desktopId: m.desktopId || acc.stats?.desktopId || '',
+    desktopCode: acc.stats?.desktopId ? String(acc.stats.desktopId).slice(-6) : '',
+    desktopName: m.desktopName || '天翼云电脑',
+    useStatusText: (acc.stats?.keepAliveStatus === 'online' || m.status === 'online') ? '运行中' : '就绪',
+    flavorName: '标准版'
+  }];
+
+  if (dList.length > 0) {
+    desktopsHtml = `
+      <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;">
+        <div style="font-size: 12px; font-weight: 700; color: #334155; margin-bottom: 6px; display: flex; justify-content: space-between;">
+          <span>🖥️ 名下云电脑 (${dList.length}台)</span>
+          <span style="color: ${dList.length > 1 ? '#10b981' : '#64748b'}; font-weight: 600;">${dList.length > 1 ? '🟢 全量多机保活已激活' : '多设备独立支持'}</span>
+        </div>
+          <div style="display: flex; flex-direction: column; gap: 6px;">
+            ${dList.map(d => {
+              const idText = d.desktopCode || d.desktopId || d.objId || '主设备';
+              const isRunning = (d.useStatusText || '').includes('运行') || d.useStatus === 1 || d.useStatus === 0;
+              // 前端规格解析 (完全对齐 ctyun-pro parseDesktopSpec 策略)
+              const flavor = d.flavorName || '';
+              const name = d.desktopName || '';
+              let cpuClean = d.cpu ? String(d.cpu).replace(/核+$/g, '') : '';
+              let memClean = d.memory ? String(d.memory).replace(/[Gg]+$/g, '') : '';
+              if (!cpuClean || !memClean) {
+                const explicit = (flavor.match(/(\d+)C(\d+)G/i) || name.match(/(\d+)C(\d+)G/i));
+                if (explicit) {
+                  cpuClean = cpuClean || explicit[1];
+                  memClean = memClean || explicit[2];
+                } else {
+                  const cn = (flavor + ' ' + name).match(/(\d+)\s*核\s*[/]?\s*(\d+)\s*G/i);
+                  if (cn) {
+                    cpuClean = cpuClean || cn[1];
+                    memClean = memClean || cn[2];
+                  }
+                }
+              }
+              // 版本名智能映射兜底 (旗舰16C32G / 尊享·精英8C16G / 标准4C8G / 其余8C16G)
+              if (!cpuClean || !memClean) {
+                let spec = '8C16G';
+                if (name.includes('旗舰版') || flavor.includes('旗舰版')) spec = '16C32G';
+                else if (name.includes('尊享版') || flavor.includes('尊享版') || name.includes('精英版') || flavor.includes('精英版')) spec = '8C16G';
+                else if (name.includes('标准版') || flavor.includes('标准版')) spec = '4C8G';
+                const m2 = spec.match(/(\d+)C(\d+)G/);
+                cpuClean = cpuClean || m2[1];
+                memClean = memClean || m2[2];
+              }
+              const specSuffix = ` · ${cpuClean}核/${memClean}G`;
+              return `
+                <div style="display: flex; justify-content: space-between; align-items: center; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px 10px; font-size: 12px; gap: 8px;">
+                  <div style="display: flex; flex-direction: column; min-width: 0; flex: 1; overflow: hidden;">
+                    <div style="display: flex; align-items: center; gap: 6px; overflow: hidden; white-space: nowrap;">
+                      <span title="${escapeHtml(d.desktopName || '云电脑')}" style="color: #0f172a; font-weight: 700; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; cursor: help;">${escapeHtml(d.desktopName || '云电脑')}</span>
+                      ${d.flavorName ? `<span style="font-size: 10.5px; background: #eff6ff; color: #2563eb; padding: 1px 6px; border-radius: 4px; flex-shrink: 0; white-space: nowrap;">${escapeHtml(d.flavorName)}</span>` : ''}
+                    </div>
+                    <span style="font-size: 11px; color: #64748b; margin-top: 1px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;" title="设备ID: ${escapeHtml(idText)}${escapeHtml(specSuffix)}">ID: ${escapeHtml(idText)}${escapeHtml(specSuffix)}</span>
+                  </div>
+                  <div style="display: flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap;">
+                    <span class="badge ${isRunning ? 'badge-online' : 'badge-offline'}">${isRunning ? '运行中' : '已关机'}</span>
+                    <button class="btn btn-sm btn-primary" style="padding: 2px 7px; font-size: 11px; flex-shrink: 0; white-space: nowrap;" onclick="launchWebDesktop('${acc.id}', '${d.desktopId}')">🚀 打开</button>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+      </div>
+    `;
+  }
+
+  const targetDeviceDisplay = dList.length > 1 
+    ? `名下 ${dList.length} 台云电脑 (全量多机守护)` 
+    : `${escapeHtml(m.desktopName || dList[0]?.desktopName || '云电脑')} (${escapeHtml(m.currentHost || '已就绪')})`;
+
+  card.innerHTML = `
+    <div class="card-top">
+      <div class="account-main-info">
+        <div class="account-avatar" id="acc-avatar-${acc.id}">${(displayName)[0].toUpperCase()}</div>
+        <div class="account-name-block">
+          <div class="account-name-row">
+            <span class="account-name-text ${isEditingThis ? 'hidden' : ''}" id="acc-name-text-${acc.id}" onclick="startInlineEditName('${acc.id}')" title="点击直接修改账号备注">
+              <span class="name-label" id="acc-name-val-${acc.id}">${escapeHtml(displayName)}</span>
+              <span class="name-edit-icon" title="点击直接修改备注">✏️</span>
+            </span>
+            <input type="text" class="inline-name-input ${isEditingThis ? '' : 'hidden'}" id="acc-name-input-${acc.id}" value="${escapeHtml(displayName)}" onkeydown="handleInlineNameKey(event, '${acc.id}')" onblur="saveInlineName('${acc.id}')" maxlength="30" placeholder="账号备注名">
+          </div>
+          <div class="account-phone">
+            <span>${fullPhone}</span>
+            <span class="badge" style="background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;">天翼云</span>
+            ${boundBadgeHtml}
+            ${sessionBadge}
+          </div>
+        </div>
+      </div>
+      <div style="display: flex; gap: 4px;">
+        <button class="btn btn-sm" onclick="editAccount('${acc.id}')" title="编辑账号与重新验证">✏️</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteAccount('${acc.id}')" title="删除账号">🗑️</button>
+      </div>
+    </div>
+
+    <!-- 🖥️ 名下云电脑列表 -->
+    ${desktopsHtml}
+
+    <!-- 📡 真实 WebSocket 保活心跳状态监视 -->
+    <div style="background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; font-size: 12px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+        <span style="color: #2563eb; font-weight: 700;">📡 状态与心跳监视</span>
+        <span id="acc-countdown-${acc.id}" style="color: var(--text-muted);">${f.cloudHang && !(m.officialTasks?.find(t => t.name.includes('使用1小时'))?.status === 2) ? `模式: <b style="color:#d97706;">持续挂机累加</b> (剩余: <b style="color:#2563eb;">${m.cycleCountdown || 0}s</b>)` : `脉冲间隔: <b>${acc.pulseIntervalSeconds || 30}s</b> (脉冲倒计时: <b style="color:#16a34a;">${m.cycleCountdown || 30}s</b>)`}</span>
+      </div>
+      <div style="color: #475569; line-height: 1.8;">
+        <div style="display: flex; align-items: baseline; gap: 4px; overflow: hidden; white-space: nowrap;">
+          <span style="flex-shrink: 0;">目标设备:</span>
+          <span id="acc-host-${acc.id}" title="${targetDeviceDisplay}" style="color: #0f172a; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; flex: 1; cursor: help;">${targetDeviceDisplay}</span>
+        </div>
+        <div style="display: flex; align-items: baseline; gap: 4px; overflow: hidden; white-space: nowrap;">
+          <span style="flex-shrink: 0;">当前动作:</span>
+          <span id="acc-hb-text-${acc.id}" title="${escapeHtml(m.lastHeartbeatResult || '正在建立心跳通道...')}" style="color: ${(m.lastHeartbeatResult || '').includes('避让') ? '#d97706' : '#16a34a'}; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; flex: 1; cursor: help;">${escapeHtml(m.lastHeartbeatResult || '正在建立心跳通道...')}</span>
+        </div>
+        <div>成功轮次: <span id="acc-success-count-${acc.id}" style="color: #2563eb; font-weight: 600;">${m.successCount || 0} 轮</span></div>
+      </div>
+    </div>
+
+    <!-- 🏆 天翼云官方真实任务看板 (精致可折叠设计，状态持久化) -->
+    <details style="background: #ffffff; border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; font-size: 13px;" ${isDetailsOpen(acc.id, 'tasks') ? 'open' : ''} ontoggle="saveDetailsState('${acc.id}', 'tasks', this.open)">
+      <summary style="display: flex; justify-content: space-between; align-items: center; cursor: pointer; font-weight: 700; user-select: none;">
+        <span style="color: #b45309;">🏆 官方任务进度 (总分: <b id="acc-points-val-${acc.id}" style="color:#16a34a;">${m.userPoints || 0}</b>)</span>
+        <span style="font-size: 11px; color: var(--text-muted); font-weight: normal;">点击收起/展开</span>
+      </summary>
+      <div id="acc-tasks-list-${acc.id}" style="display: flex; flex-direction: column; gap: 6px; margin-top: 10px;">
         ${officialTaskHtml}
       </div>
+    </details>
 
-      <!-- 功能开关 -->
-      <div class="features-box">
+    <!-- 功能开关 (精致折叠设计，状态持久化) -->
+    <details class="features-box" style="padding: 10px 14px;" ${isDetailsOpen(acc.id, 'features') ? 'open' : ''} ontoggle="saveDetailsState('${acc.id}', 'features', this.open)">
+      <summary style="display: flex; justify-content: space-between; align-items: center; cursor: pointer; font-size: 12.5px; font-weight: 700; color: #334155; user-select: none; margin-bottom: 2px;">
+        <span>⚙️ 自动化任务与保活开关</span>
+        <span style="font-size: 11px; color: var(--text-muted); font-weight: normal;">点击收起/展开</span>
+      </summary>
+      <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
         <div class="feature-row">
           <span>📡 启用云电脑保活 (${m.keepAliveSeconds || 60}s周期守护/${acc.pulseIntervalSeconds || 30}s旁观脉冲)</span>
           <label class="switch">
@@ -524,26 +807,325 @@ function renderAccounts() {
           <button class="btn btn-sm btn-warning" onclick="openRedeemModal('${acc.id}')">⚙️ 奖品与抽奖设置</button>
         </div>
       </div>
+    </details>
 
-      <!-- 快捷操作按钮 -->
-      <div class="card-actions">
-        ${acc.sessionExpired ? `
-          <button class="btn btn-danger btn-launch-full" onclick="editAccount('${acc.id}')" style="margin-bottom:6px;">
-            <span>🔑 重新验证登录</span>
-            <span class="btn-subtext">输验证码恢复 ➔</span>
-          </button>
-        ` : ''}
-        <div class="card-action-tools">
-          <button class="btn btn-tool" onclick="syncAccountTasks('${acc.id}')" title="一键极速执行今日全部任务 (打卡/AI对话/挂机)">🔄 一键同步任务</button>
-          <button class="btn btn-tool" onclick="openPowerModal('${acc.id}')" title="云电脑电源管理 (开机/重启/关机)">⚡ 电源管理</button>
-          <button class="btn btn-tool" onclick="openManualRedeemModal('${acc.id}')" title="根据当前积分手动兑换商品或抽奖">🎁 积分商城</button>
+    <!-- 快捷操作按钮 -->
+    <div class="card-actions">
+      ${acc.sessionExpired ? `
+        <button class="btn btn-danger btn-launch-full" onclick="editAccount('${acc.id}')" style="margin-bottom:6px;">
+          <span>🔑 重新验证登录</span>
+          <span class="btn-subtext">输验证码恢复 ➔</span>
+        </button>
+      ` : ''}
+      <div class="card-action-tools">
+        <button class="btn btn-tool" onclick="syncAccountTasks('${acc.id}')" title="一键极速执行今日全部任务 (打卡/AI对话/挂机)">🔄 一键同步任务</button>
+        <button class="btn btn-tool" onclick="openPowerModal('${acc.id}')" title="云电脑电源管理 (开机/重启/关机)">⚡ 电源管理</button>
+        <button class="btn btn-tool" onclick="openManualRedeemModal('${acc.id}')" title="根据当前积分手动兑换商品或抽奖">🎁 积分商城</button>
+      </div>
+      ${!acc.bound ? `<button class="btn btn-sm btn-warning" style="width:100%;margin-top:2px;" onclick="openSmsModal('${acc.id}')">📲 短信二次安全绑定</button>` : ''}
+    </div>
+  `;
+
+  return card;
+}
+
+// 原地静默增量局部数据更新 (100% 杜绝 DOM 结构重绘与滚动条跳跃)
+function updateAccountsInPlace(filteredAccounts) {
+  filteredAccounts.forEach(acc => {
+    const card = document.getElementById(`acc-card-${acc.id}`);
+    if (!card) return;
+
+    const isYdpc = acc.platform === 'ydpc';
+    const isYdpcRealOnline = isYdpc 
+      ? (acc.liveMetrics?.status === "online") 
+      : (acc.stats?.keepAliveStatus === "online" || acc.liveMetrics?.status === "online");
+    const m = acc.liveMetrics || {};
+    const f = acc.features || {};
+
+    // 1. 更新保活状态徽章
+    const statusBadgeEl = document.getElementById(`acc-status-badge-${acc.id}`);
+    if (statusBadgeEl) {
+      statusBadgeEl.innerHTML = isYdpcRealOnline 
+        ? `<span class="badge badge-online">保活在线</span>`
+        : `<span class="badge badge-offline">离线待机</span>`;
+    }
+
+    // 2. 更新心跳/动作文本
+    const hbTextEl = document.getElementById(`acc-hb-text-${acc.id}`);
+    if (hbTextEl) {
+      const hbResult = m.lastHeartbeatResult || (isYdpc ? '保活巡检待命' : '正在建立心跳通道...');
+      hbTextEl.innerText = hbResult;
+      hbTextEl.title = hbResult;
+      if (!isYdpc) {
+        hbTextEl.style.color = hbResult.includes('避让') ? '#d97706' : '#16a34a';
+      }
+    }
+
+    // 3. 更新倒计时与轮次 (天翼云)
+    const cdEl = document.getElementById(`acc-countdown-${acc.id}`);
+    if (cdEl) {
+      cdEl.innerHTML = f.cloudHang && !(m.officialTasks?.find(t => t.name.includes('使用1小时'))?.status === 2)
+        ? `模式: <b style="color:#d97706;">持续挂机累加</b> (剩余: <b style="color:#2563eb;">${m.cycleCountdown || 0}s</b>)`
+        : `脉冲间隔: <b>${acc.pulseIntervalSeconds || 30}s</b> (脉冲倒计时: <b style="color:#16a34a;">${m.cycleCountdown || 30}s</b>)`;
+    }
+
+    const successEl = document.getElementById(`acc-success-count-${acc.id}`);
+    if (successEl) {
+      successEl.innerText = `${m.successCount || 0} 轮`;
+    }
+
+    // 4. 更新移动云上次活跃时间
+    const activeInfoEl = document.getElementById(`acc-active-info-${acc.id}`);
+    if (activeInfoEl) {
+      activeInfoEl.innerHTML = `上次活跃: <span style="color: #0f172a; font-weight: 600;">${m.lastHeartbeatTime || acc.stats?.lastKeepAliveTime || '刚刚'}</span> · 周期: <b>${Math.round((acc.keepaliveInterval || 600) / 60)} 分钟</b>`;
+    }
+
+    // 5. 更新官方任务积分与列表 (天翼云)
+    const pointsValEl = document.getElementById(`acc-points-val-${acc.id}`);
+    if (pointsValEl) {
+      pointsValEl.innerText = m.userPoints || 0;
+    }
+
+    const tasksListEl = document.getElementById(`acc-tasks-list-${acc.id}`);
+    if (tasksListEl && m.officialTasks && m.officialTasks.length > 0) {
+      tasksListEl.innerHTML = buildOfficialTasksHtml(m);
+    }
+  });
+}
+
+// 账号卡片 HTML 模板生成
+function renderAccounts(isSilent = false) {
+  const container = document.getElementById("accounts-container");
+  if (!container) return;
+
+  // 1. 如果用户正在拖拽卡片或正在行内编辑备注名，跳过重绘避免打断交互
+  if (draggedAccId || activeEditingAccId) return;
+
+  // 如果未登录，严格阻断访客查看云电脑信息，只显示登录注册引导
+  if (!currentUser) {
+    container.innerHTML = `
+      <div style="grid-column: 1 / -1; text-align: center; padding: 48px 24px; background: var(--bg-secondary); border-radius: var(--radius); border: 1px dashed var(--border); box-shadow: var(--shadow);">
+        <div style="font-size: 40px; margin-bottom: 12px;">🔒</div>
+        <h3 style="font-size: 17px; font-weight: 700; color: #0f172a; margin-bottom: 8px;">请登录后查看与管理云电脑</h3>
+        <p style="font-size: 13.5px; color: var(--text-muted); max-width: 500px; margin: 0 auto 20px auto;">
+          为保障账号隐私安全与多用户隔离，未登录访客无法查看或添加云电脑。请登录已有账号，或免费注册新账号开启独立后台。
+        </p>
+        <div style="display: flex; gap: 12px; justify-content: center;">
+          <button class="btn btn-primary" onclick="openAuthModal('login')">🔑 立即登录</button>
+          <button class="btn" onclick="openAuthModal('register')">✨ 免费注册新用户</button>
         </div>
-        ${!acc.bound ? `<button class="btn btn-sm btn-warning" style="width:100%;margin-top:2px;" onclick="openSmsModal('${acc.id}')">📲 短信二次安全绑定</button>` : ''}
       </div>
     `;
+    return;
+  }
 
-    container.appendChild(card);
+  // 智能切换平台视图 Tab 栏：只有当同时存在天翼云和移动云两种设备时才显示 Tab，单一平台时自动隐藏
+  const hasCtyun = (accounts || []).some(a => a.platform === 'ctyun' || !a.platform);
+  const hasYdpc = (accounts || []).some(a => a.platform === 'ydpc');
+  const viewTabsGroup = document.getElementById("account-view-tabs-group");
+  if (viewTabsGroup) {
+    if (hasCtyun && hasYdpc) {
+      viewTabsGroup.style.display = "flex";
+    } else {
+      viewTabsGroup.style.display = "none";
+      activeAccountViewTab = 'all'; // 自动还原
+    }
+  }
+
+  // 根据当前视图过滤账号
+  const filteredAccounts = getFilteredAccounts();
+
+  if (!filteredAccounts || filteredAccounts.length === 0) {
+    const tabName = activeAccountViewTab === 'ydpc' ? '中国移动云电脑' : (activeAccountViewTab === 'ctyun' ? '天翼云电脑' : '云电脑');
+    container.innerHTML = `
+      <div style="grid-column: 1 / -1; text-align: center; padding: 40px; color: var(--text-muted); background: var(--bg-secondary); border-radius: var(--radius); border: 1px dashed var(--border);">
+        <p style="font-size: 15px; margin-bottom: 12px;">当前暂未配置【${tabName}】设备</p>
+        <button class="btn btn-primary" onclick="openAddAccountModal()">➕ 立即添加云电脑</button>
+      </div>
+    `;
+    return;
+  }
+
+  const cols = getGridColumns();
+  const slots = loadGridSlots(filteredAccounts, cols);
+
+  // 2. 检查是否可无感局部原地更新 (In-Place Update)
+  // 如果现有的 DOM 卡片结构和 slots 一致，直接更新动态文本与指标，100% 避免销毁 DOM 和触发表单/滚动条复位！
+  if (isSilent) {
+    const existingChildren = container.children;
+    let matchExact = existingChildren.length === slots.length;
+    if (matchExact) {
+      for (let i = 0; i < slots.length; i++) {
+        const expectedAccId = slots[i];
+        const el = existingChildren[i];
+        if (!expectedAccId) {
+          if (!el.classList.contains("grid-empty-slot")) { matchExact = false; break; }
+        } else {
+          if (!el.classList.contains("account-card") || el.dataset.accId !== expectedAccId) { matchExact = false; break; }
+        }
+      }
+    }
+
+    if (matchExact) {
+      updateAccountsInPlace(filteredAccounts);
+      return;
+    }
+  }
+
+  // 3. 结构发生变动时的平滑重绘：锁定高度与滚动位置
+  const prevScrollY = window.scrollY || window.pageYOffset || 0;
+  const currentHeight = container.offsetHeight;
+  if (currentHeight > 0) {
+    container.style.minHeight = `${currentHeight}px`;
+  }
+
+  const fragment = document.createDocumentFragment();
+
+  slots.forEach((accId, slotIndex) => {
+    if (!accId) {
+      const emptySlot = document.createElement("div");
+      emptySlot.className = "grid-empty-slot";
+      emptySlot.dataset.slot = slotIndex;
+      emptySlot.innerHTML = "";
+      emptySlot.addEventListener("dragover", handleSlotDragOver);
+      emptySlot.addEventListener("dragleave", handleSlotDragLeave);
+      emptySlot.addEventListener("drop", handleSlotDrop);
+      fragment.appendChild(emptySlot);
+      return;
+    }
+
+    const acc = filteredAccounts.find(a => a.id === accId);
+    if (!acc) return;
+
+    const card = buildAccountCardElement(acc, slotIndex);
+    fragment.appendChild(card);
   });
+
+  container.innerHTML = "";
+  container.appendChild(fragment);
+
+  // 渲染完成释放高度并确保滚动位置绝对稳定
+  requestAnimationFrame(() => {
+    container.style.minHeight = "";
+    if (Math.abs(window.scrollY - prevScrollY) > 2) {
+      window.scrollTo({ top: prevScrollY, behavior: "instant" });
+    }
+  });
+}
+
+// ==========================================
+// 卡片自由网格插槽拖拽交互与持久化
+// ==========================================
+let draggedCardEl = null;
+let draggedAccId = null;
+let draggedSlotIndex = null;
+
+function handleCardDragStart(e) {
+  draggedCardEl = this;
+  draggedAccId = this.dataset.accId;
+  draggedSlotIndex = parseInt(this.dataset.slot, 10);
+  this.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", draggedAccId);
+
+  // 激活所有可放置空位插槽的高亮
+  document.querySelectorAll(".grid-empty-slot").forEach(s => s.classList.add("droppable"));
+}
+
+function handleCardDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  if (this !== draggedCardEl) {
+    this.classList.add("drag-over");
+  }
+}
+
+function handleCardDragLeave(e) {
+  this.classList.remove("drag-over");
+}
+
+function handleSlotDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  this.classList.add("drag-over");
+}
+
+function handleSlotDragLeave(e) {
+  this.classList.remove("drag-over");
+}
+
+function handleSlotDrop(e) {
+  e.preventDefault();
+  this.classList.remove("drag-over");
+  const targetSlot = parseInt(this.dataset.slot, 10);
+  if (isNaN(targetSlot) || isNaN(draggedSlotIndex) || targetSlot === draggedSlotIndex || !draggedAccId) return;
+
+  const cols = getGridColumns();
+  const currentAccs = getFilteredAccounts();
+  const slots = loadGridSlots(currentAccs, cols);
+
+  // 移动卡片到目标空位插槽
+  slots[draggedSlotIndex] = null;
+  slots[targetSlot] = draggedAccId;
+
+  saveGridSlots(slots);
+  renderAccounts();
+  saveAccountsOrderFromSlots(slots);
+}
+
+function handleCardDrop(e) {
+  e.preventDefault();
+  this.classList.remove("drag-over");
+  const targetSlot = parseInt(this.dataset.slot, 10);
+  if (isNaN(targetSlot) || isNaN(draggedSlotIndex) || targetSlot === draggedSlotIndex || !draggedAccId) return;
+
+  const cols = getGridColumns();
+  const currentAccs = getFilteredAccounts();
+  const slots = loadGridSlots(currentAccs, cols);
+
+  // 互换两个插槽的内容
+  const temp = slots[targetSlot];
+  slots[targetSlot] = draggedAccId;
+  slots[draggedSlotIndex] = temp;
+
+  saveGridSlots(slots);
+  renderAccounts();
+  saveAccountsOrderFromSlots(slots);
+}
+
+function handleCardDragEnd(e) {
+  this.classList.remove("dragging");
+  draggedCardEl = null;
+  draggedAccId = null;
+  draggedSlotIndex = null;
+  document.querySelectorAll(".account-card, .grid-empty-slot").forEach(c => {
+    c.classList.remove("drag-over");
+    c.classList.remove("droppable");
+  });
+}
+
+function saveAccountsOrderFromSlots(slots) {
+  const orderedIds = slots.filter(Boolean);
+  for (const a of accounts) {
+    if (!orderedIds.includes(a.id)) orderedIds.push(a.id);
+  }
+  accounts.sort((a, b) => {
+    const idxA = orderedIds.indexOf(a.id);
+    const idxB = orderedIds.indexOf(b.id);
+    return (idxA === -1 ? 999 : idxA) - (idxB === -1 ? 999 : idxB);
+  });
+  saveAccountsOrder();
+}
+
+async function saveAccountsOrder() {
+  const orderedIds = accounts.map(a => a.id);
+  try {
+    await authFetch("/api/accounts/reorder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orderedIds })
+    });
+  } catch (e) {}
 }
 
 // 账号备注名即点即改 (Inline Edit)
@@ -664,8 +1246,6 @@ async function toggleFeature(accId, featureKey, checked) {
 }
 
 // 3. 添加/编辑账号
-let currentCaptchaChallenge = null;
-
 async function refreshModalCaptcha() {
   const user = document.getElementById("acc-user").value.trim() || '13800000000';
   const devCode = document.getElementById("acc-device-code").value.trim() || '';
@@ -693,9 +1273,6 @@ async function refreshModalCaptcha() {
     loadingEl.innerText = "网络异常，点击重试";
   }
 }
-
-let qrPollingTimer = null;
-let currentQrCodeId = '';
 
 function switchAccountLoginTab(tab) {
   const btnQr = document.getElementById("tab-btn-qrcode");
@@ -782,7 +1359,6 @@ async function loadQrCodeForModal() {
 }
 
 function openAddAccountModal() {
-  document.getElementById("modal-account-title").innerText = "添加天翼云账号";
   document.getElementById("acc-id").value = "";
   document.getElementById("acc-name").value = "";
   document.getElementById("acc-user").value = "";
@@ -791,27 +1367,221 @@ function openAddAccountModal() {
   document.getElementById("acc-device-code").value = "";
   const qrNameEl = document.getElementById("qrcode-acc-name");
   if (qrNameEl) qrNameEl.value = "";
-  const tabContainer = document.getElementById("acc-login-tabs");
-  if (tabContainer) tabContainer.style.display = "flex";
+  const ydNameEl = document.getElementById("ydpc-name");
+  if (ydNameEl) ydNameEl.value = "";
+  const ydUserEl = document.getElementById("ydpc-user");
+  if (ydUserEl) ydUserEl.value = "";
+  const ydPwdEl = document.getElementById("ydpc-password");
+  if (ydPwdEl) ydPwdEl.value = "";
+
+  const platformTabs = document.getElementById("platform-tabs-container");
+  if (platformTabs) platformTabs.style.display = "flex";
+
   openModal("account-modal");
-  switchAccountLoginTab('qrcode');
+  switchAddAccountPlatform('ctyun');
+}
+
+function switchAddAccountPlatform(platform) {
+  currentAddPlatform = platform;
+  const tabCt = document.getElementById("platform-tab-ctyun");
+  const tabYd = document.getElementById("platform-tab-ydpc");
+  const panelCt = document.getElementById("panel-add-ctyun");
+  const panelYd = document.getElementById("panel-add-ydpc");
+  const btnSaveCt = document.getElementById("btn-save-account-pwd");
+  const btnSaveYd = document.getElementById("btn-save-account-ydpc");
+  const modalTitle = document.getElementById("modal-account-title");
+
+  if (platform === 'ydpc') {
+    if (tabCt) tabCt.className = "btn btn-sm";
+    if (tabYd) tabYd.className = "btn btn-sm btn-primary";
+    if (panelCt) panelCt.classList.add("hidden");
+    if (panelYd) panelYd.classList.remove("hidden");
+    if (btnSaveCt) btnSaveCt.style.display = "none";
+    if (btnSaveYd) btnSaveYd.style.display = "inline-block";
+    if (modalTitle) modalTitle.innerText = "添加中国移动云电脑";
+    if (qrPollingTimer) { clearInterval(qrPollingTimer); qrPollingTimer = null; }
+  } else {
+    if (tabCt) tabCt.className = "btn btn-sm btn-primary";
+    if (tabYd) tabYd.className = "btn btn-sm";
+    if (panelCt) panelCt.classList.remove("hidden");
+    if (panelYd) panelYd.classList.add("hidden");
+    if (btnSaveYd) btnSaveYd.style.display = "none";
+    if (modalTitle) modalTitle.innerText = "添加天翼云电脑账号";
+    switchAccountLoginTab('qrcode');
+  }
+}
+
+async function saveYdpcAccount() {
+  const accId = document.getElementById("acc-id") ? document.getElementById("acc-id").value : "";
+  const name = document.getElementById("ydpc-name") ? document.getElementById("ydpc-name").value.trim() : "";
+  const user = document.getElementById("ydpc-user") ? document.getElementById("ydpc-user").value.trim() : "";
+  const password = document.getElementById("ydpc-password") ? document.getElementById("ydpc-password").value.trim() : "";
+  const accountType = document.getElementById("ydpc-account-type") ? document.getElementById("ydpc-account-type").value : "main";
+  const keepaliveInterval = document.getElementById("ydpc-interval") ? parseInt(document.getElementById("ydpc-interval").value) || 600 : 600;
+  const autoBoot = document.getElementById("ydpc-autoboot") ? document.getElementById("ydpc-autoboot").checked : true;
+
+  if (!user || !password) {
+    showToast("请输入移动云手机号和密码", "error");
+    return;
+  }
+
+  if (accId) {
+    // 编辑修改模式
+    showToast("正在保存移动云账号修改并重新同步...", "info");
+    try {
+      const res = await authFetch(`/api/accounts/${accId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name || user,
+          user,
+          password,
+          accountType,
+          keepaliveInterval,
+          features: { autoBoot, cagKeepAlive: true, sohoHeartbeat: true, keepAlive: true }
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast("🎉 移动云账号修改已保存！", "success");
+        closeModal("account-modal");
+        await loadAccounts(true);
+      } else {
+        showToast(data.error || "更新失败", "error");
+      }
+    } catch (e) {
+      showToast("网络请求异常: " + e.message, "error");
+    }
+    return;
+  }
+
+  // 新增模式
+  showToast("正在向中国移动 SOHO 中心验证并拉取云电脑...", "info");
+  try {
+    const res = await authFetch("/api/accounts/ydpc/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, user, password, accountType, keepaliveInterval, autoBoot })
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast("🎉 移动云电脑添加成功！已自动开启保活守护", "success");
+      closeModal("account-modal");
+      await loadAccounts(true);
+    } else {
+      showToast(data.error || "添加移动云电脑失败", "error");
+    }
+  } catch (e) {
+    showToast("网络请求异常: " + e.message, "error");
+  }
 }
 
 function editAccount(accId) {
   const acc = accounts.find(a => a.id === accId);
   if (!acc) return;
-  document.getElementById("modal-account-title").innerText = acc.sessionExpired ? "⚠️ 重新验证天翼云账号" : "编辑天翼云账号";
   document.getElementById("acc-id").value = acc.id;
-  document.getElementById("acc-name").value = acc.name || "";
-  document.getElementById("acc-user").value = acc.user || "";
-  document.getElementById("acc-password").value = acc.password || "";
-  document.getElementById("acc-captcha-code").value = "";
-  document.getElementById("acc-device-code").value = acc.deviceCode || "";
-  const tabContainer = document.getElementById("acc-login-tabs");
-  if (tabContainer) tabContainer.style.display = "none";
-  openModal("account-modal");
-  switchAccountLoginTab('pwd');
-  setTimeout(refreshModalCaptcha, 300);
+
+  const platformTabs = document.getElementById("platform-tabs-container");
+  if (platformTabs) platformTabs.style.display = "none"; // 编辑模式锁定平台
+
+  if (acc.platform === 'ydpc') {
+    document.getElementById("modal-account-title").innerText = "编辑中国移动云电脑账号";
+    const nameEl = document.getElementById("ydpc-name");
+    const userEl = document.getElementById("ydpc-user");
+    const pwdEl = document.getElementById("ydpc-password");
+    const typeEl = document.getElementById("ydpc-account-type");
+    const intEl = document.getElementById("ydpc-interval");
+    const bootEl = document.getElementById("ydpc-autoboot");
+
+    if (nameEl) nameEl.value = acc.name || "";
+    if (userEl) userEl.value = acc.user || "";
+    if (pwdEl) pwdEl.value = acc.password || "";
+    if (typeEl) typeEl.value = acc.accountType || "main";
+    if (intEl) intEl.value = String(acc.keepaliveInterval || 600);
+    if (bootEl) bootEl.checked = acc.features?.autoBoot !== false;
+
+    openModal("account-modal");
+    switchAddAccountPlatform('ydpc');
+  } else {
+    document.getElementById("modal-account-title").innerText = acc.sessionExpired ? "⚠️ 重新验证天翼云账号" : "编辑天翼云账号";
+    document.getElementById("acc-name").value = acc.name || "";
+    document.getElementById("acc-user").value = acc.user || "";
+    document.getElementById("acc-password").value = acc.password || "";
+    document.getElementById("acc-captcha-code").value = "";
+    document.getElementById("acc-device-code").value = acc.deviceCode || "";
+    const tabContainer = document.getElementById("acc-login-tabs");
+    if (tabContainer) tabContainer.style.display = "none";
+    openModal("account-modal");
+    switchAddAccountPlatform('ctyun');
+    switchAccountLoginTab('pwd');
+    setTimeout(refreshModalCaptcha, 300);
+  }
+}
+
+async function bootYdpcVm(accId, userServiceId) {
+  const acc = accounts.find(a => a.id === accId);
+  const targetUsid = userServiceId || (acc?.vms?.[0]?.userServiceId) || (acc?.desktops?.[0]?.userServiceId);
+  showToast("正在执行移动云开机/唤醒指令...", "info");
+  try {
+    const res = await authFetch(`/api/accounts/${accId}/power/poweron`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userServiceId: targetUsid })
+    });
+    const data = await res.json();
+    if (res.ok && (data.success || data.code === 2000)) {
+      showToast("✅ " + (data.message || "开机指令已生效！"), "success");
+      await loadAccounts(true);
+    } else {
+      showToast("开机未成功: " + (data.error || data.msg || "网关拒绝"), "error");
+    }
+  } catch (e) {
+    showToast("请求异常: " + e.message, "error");
+  }
+}
+
+async function pingYdpcCag(accId, userServiceId) {
+  const acc = accounts.find(a => a.id === accId);
+  const targetUsid = userServiceId || (acc?.vms?.[0]?.userServiceId) || (acc?.desktops?.[0]?.userServiceId);
+  showToast("正在向中兴 CAG 发起三阶段 TCP 握手...", "info");
+  try {
+    const res = await authFetch(`/api/ydpc/${accId}/cag-ping`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userServiceId: targetUsid })
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast("🟢 ZTEC CAG 握手成功！网关返回 200 OK", "success");
+      await loadAccounts(true);
+    } else {
+      showToast("CAG 握手失败: " + (data.error || "超时"), "error");
+    }
+  } catch (e) {
+    showToast("请求异常: " + e.message, "error");
+  }
+}
+
+async function heartbeatYdpc(accId, userServiceId) {
+  const acc = accounts.find(a => a.id === accId);
+  const targetUsid = userServiceId || (acc?.vms?.[0]?.userServiceId) || (acc?.desktops?.[0]?.userServiceId);
+  showToast("正在发送 SOHO 心跳保持...", "info");
+  try {
+    const res = await authFetch(`/api/ydpc/${accId}/heartbeat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userServiceId: targetUsid })
+    });
+    const data = await res.json();
+    if (res.ok && (data.code === 2000 || data.code === 0 || data.success)) {
+      showToast("💓 SOHO 心跳保持成功！", "success");
+      await loadAccounts(true);
+    } else {
+      showToast("心跳异常: " + (data.msg || data.error || "失败"), "error");
+    }
+  } catch (e) {
+    showToast("请求异常: " + e.message, "error");
+  }
 }
 
 async function generateNewDeviceCode() {
@@ -936,7 +1706,6 @@ function openSmsModal(accId) {
   openModal("sms-modal");
 }
 
-let smsCountdown = 0;
 async function sendSmsCode() {
   const accId = document.getElementById("sms-acc-id").value;
   const btn = document.getElementById("btn-send-sms");
@@ -1319,9 +2088,6 @@ async function submitManualRedeemOrder() {
 // ==========================================
 // 云电脑电源管理 (开机 / 重启 / 关机)
 // ==========================================
-let currentPowerDesktopId = '';
-let currentPowerAccountDesktops = [];
-
 async function openPowerModal(accId, desktopId = '', desktopName = '') {
   const acc = accounts.find(a => a.id === accId);
   if (!acc) return;
@@ -1333,7 +2099,19 @@ async function openPowerModal(accId, desktopId = '', desktopName = '') {
   document.getElementById("power-desktop-status").innerHTML = `<span style="color: #64748b;">检测中...</span>`;
   openModal("power-modal");
 
-  // 1. 先用本地已有的 desktops 缓存极速渲染
+  if (acc.platform === 'ydpc') {
+    const vms = (acc.vms && acc.vms.length > 0) ? acc.vms : (acc.desktops || []);
+    const localList = vms.map(v => ({
+      desktopId: String(v.userServiceId),
+      desktopName: v.vmName || '中国移动云电脑',
+      useStatusText: v.vmStatus || '未知',
+      flavorName: v.cpu ? `${v.cpu}核/${v.memory}G` : ''
+    }));
+    renderPowerDesktopSelect(localList, desktopId);
+    return;
+  }
+
+  // 天翼云
   const localList = (acc.desktops && acc.desktops.length > 0) ? acc.desktops : (acc.liveMetrics?.desktopName ? [{
     desktopId: acc.liveMetrics?.desktopId || acc.stats?.desktopId || '0',
     desktopName: acc.liveMetrics?.desktopName,
@@ -1343,7 +2121,6 @@ async function openPowerModal(accId, desktopId = '', desktopName = '') {
 
   renderPowerDesktopSelect(localList, desktopId);
 
-  // 2. 异步向后端拉取实时名下全部云电脑设备与状态
   try {
     const res = await authFetch(`/api/accounts/${accId}/desktops`);
     if (res.ok) {
@@ -1404,7 +2181,8 @@ function onPowerDesktopChange() {
 
 async function executePowerAction(action) {
   const accId = document.getElementById("power-acc-id").value;
-  const actionNames = { poweron: '开机', reboot: '重启', shutdown: '关机' };
+  const acc = accounts.find(a => a.id === accId);
+  const actionNames = { poweron: '开机 / 唤醒', reboot: '重启', shutdown: '关机' };
   const actionName = actionNames[action] || action;
 
   if (action === 'shutdown' || action === 'reboot') {
@@ -1413,6 +2191,29 @@ async function executePowerAction(action) {
     }
   }
 
+  if (acc && acc.platform === 'ydpc') {
+    showToast(`正在向移动云下发【${actionName}】指令...`, "info");
+    try {
+      const res = await authFetch(`/api/accounts/${accId}/power/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userServiceId: currentPowerDesktopId })
+      });
+      const data = await res.json();
+      if (res.ok && (data.success || data.code === 2000)) {
+        showToast(data.message || `【${actionName}】指令已生效！`, "success");
+        closeModal("power-modal");
+        await loadAccounts(true);
+      } else {
+        showToast(`操作未成功: ${data.error || data.msg || '网关拒绝'}`, "error");
+      }
+    } catch (e) {
+      showToast("请求异常: " + e.message, "error");
+    }
+    return;
+  }
+
+  // 天翼云
   showToast(`正在向天翼云下发【${actionName}】指令...`, "info");
   try {
     const query = currentPowerDesktopId ? `?desktopId=${encodeURIComponent(currentPowerDesktopId)}` : '';
@@ -1421,7 +2222,6 @@ async function executePowerAction(action) {
     if (res.ok && data.success) {
       showToast(data.message || `【${actionName}】指令下达成功！`, "success");
       closeModal("power-modal");
-      // 立即刷新前端账号开关状态并重载列表
       await loadAccounts(true);
       setTimeout(() => loadAccounts(true), 1500);
     } else {
@@ -1540,15 +2340,26 @@ async function restartKeeper() {
   }
 }
 
-// 8. 全局系统设置
+// 8. 全局系统与平台调度设置 (仅管理员)
 async function openSettingsModal() {
   try {
     const res = await authFetch("/api/settings");
+    if (!res.ok) {
+      if (res.status === 403) {
+        showToast("权限不足：仅管理员可访问全局系统设置", "error");
+        return;
+      }
+      showToast("获取系统设置失败", "error");
+      return;
+    }
     const settings = await res.json();
 
     const c = settings.cron || {};
     if (document.getElementById("set-system-title")) {
-      document.getElementById("set-system-title").value = settings.systemTitle || "天翼云自动化控制中心";
+      document.getElementById("set-system-title").value = settings.systemTitle || "天翼云/移动云电脑保活签到中心";
+    }
+    if (document.getElementById("set-system-subtitle")) {
+      document.getElementById("set-system-subtitle").value = settings.systemSubtitle || "多账号长连接保活守护 · 多运营商支持 · 每日签到打卡 · 智能挂机";
     }
     if (document.getElementById("cron-task-time")) {
       document.getElementById("cron-task-time").value = c.executeTime || "01:20";
@@ -1557,15 +2368,17 @@ async function openSettingsModal() {
     if (document.getElementById("cron-enable-sub")) {
       document.getElementById("cron-enable-sub").checked = enableSub;
     }
-    document.getElementById("cron-sign").value = c.signCron || "";
-    document.getElementById("cron-aichat").value = c.aiChatCron || "";
-    document.getElementById("cron-hang").value = c.cloudHangCron || "";
-    document.getElementById("cron-redeem").value = c.redeemCron || "";
+    if (document.getElementById("cron-sign")) document.getElementById("cron-sign").value = c.signCron || "";
+    if (document.getElementById("cron-aichat")) document.getElementById("cron-aichat").value = c.aiChatCron || "";
+    if (document.getElementById("cron-hang")) document.getElementById("cron-hang").value = c.cloudHangCron || "";
+    if (document.getElementById("cron-redeem")) document.getElementById("cron-redeem").value = c.redeemCron || "";
     toggleSubCronInputs(enableSub);
 
-    document.getElementById("set-keepalive-sec").value = settings.keepAliveSeconds || 60;
+    if (document.getElementById("set-keepalive-sec")) {
+      document.getElementById("set-keepalive-sec").value = settings.keepAliveSeconds || 60;
+    }
     if (document.getElementById("set-pulse-sec")) {
-      document.getElementById("set-pulse-sec").value = settings.pulseIntervalSeconds || (settings.pulseIntervalMinutes ? settings.pulseIntervalMinutes * 60 : 30);
+      document.getElementById("set-pulse-sec").value = settings.pulseIntervalSeconds || 30;
     }
     if (document.getElementById("set-allow-reg")) {
       document.getElementById("set-allow-reg").checked = settings.allowRegistration === true;
@@ -1574,46 +2387,9 @@ async function openSettingsModal() {
       document.getElementById("set-default-quota").value = settings.defaultQuota || 2;
     }
 
-    const n = settings.notify || {};
-    document.getElementById("notify-enabled").checked = !!n.enabled;
-    document.getElementById("notify-channel").value = n.channel || "webhook";
-    document.getElementById("notify-token").value = n.webhookUrl || "";
-    document.getElementById("notify-title-tpl").value = n.customTitleTemplate || "";
-    document.getElementById("notify-content-tpl").value = n.customContentTemplate || "";
-    onNotifyChannelChange();
-
     openModal("settings-modal");
   } catch (e) {
-    showToast("获取设置失败", "error");
-  }
-}
-
-async function testNotification() {
-  const channel = document.getElementById("notify-channel").value;
-  const webhookUrl = document.getElementById("notify-token").value.trim();
-  const customTitleTemplate = document.getElementById("notify-title-tpl").value.trim();
-  const customContentTemplate = document.getElementById("notify-content-tpl").value.trim();
-
-  if (!webhookUrl) {
-    showToast("请先输入推送地址或 Token", "error");
-    return;
-  }
-
-  showToast("正在发送测试推送...", "info");
-  try {
-    const res = await authFetch("/api/notify/test", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channel, webhookUrl, customTitleTemplate, customContentTemplate })
-    });
-    const data = await res.json();
-    if (res.ok && data.success) {
-      showToast("🎉 推送成功！已向你的通道发送测试卡片", "success");
-    } else {
-      showToast(`推送失败: ${data.message || '网络无法连通'}`, "error");
-    }
-  } catch (e) {
-    showToast("请求异常: " + e.message, "error");
+    showToast("获取设置失败: " + e.message, "error");
   }
 }
 
@@ -1628,17 +2404,121 @@ function toggleSubCronInputs(enabled) {
   });
 }
 
-function onNotifyChannelChange() {
-  const channel = document.getElementById("notify-channel").value;
-  const label = document.getElementById("notify-token-label");
-  const input = document.getElementById("notify-token");
+async function saveSettings() {
+  const customTitle = document.getElementById("set-system-title") ? document.getElementById("set-system-title").value.trim() : "";
+  const customSubtitle = document.getElementById("set-system-subtitle") ? document.getElementById("set-system-subtitle").value.trim() : "";
+  const payload = {
+    systemTitle: customTitle || "天翼云/移动云电脑保活签到中心",
+    systemSubtitle: customSubtitle || "多账号长连接保活守护 · 多运营商支持 · 每日签到打卡 · 智能挂机",
+    keepAliveSeconds: parseInt(document.getElementById("set-keepalive-sec") ? document.getElementById("set-keepalive-sec").value : 60) || 60,
+    pulseIntervalSeconds: Math.min(3300, Math.max(10, parseInt(document.getElementById("set-pulse-sec") ? document.getElementById("set-pulse-sec").value : 30) || 30)),
+    allowRegistration: document.getElementById("set-allow-reg") ? document.getElementById("set-allow-reg").checked : false,
+    defaultQuota: document.getElementById("set-default-quota") ? parseInt(document.getElementById("set-default-quota").value) || 2 : 2,
+    cron: {
+      executeTime: document.getElementById("cron-task-time") ? document.getElementById("cron-task-time").value.trim() : "01:20",
+      enableSubCron: document.getElementById("cron-enable-sub") ? document.getElementById("cron-enable-sub").checked : false,
+      signCron: document.getElementById("cron-sign") ? document.getElementById("cron-sign").value.trim() : "",
+      aiChatCron: document.getElementById("cron-aichat") ? document.getElementById("cron-aichat").value.trim() : "",
+      cloudHangCron: document.getElementById("cron-hang") ? document.getElementById("cron-hang").value.trim() : "",
+      redeemCron: document.getElementById("cron-redeem") ? document.getElementById("cron-redeem").value.trim() : ""
+    }
+  };
+
+  try {
+    const res = await authFetch("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (res.ok) {
+      showToast("全局系统设置已成功更新！调度已即时热重载", "success");
+      closeModal("settings-modal");
+      if (payload.systemTitle) {
+        const titleEl = document.getElementById("main-system-title");
+        if (titleEl) titleEl.innerText = payload.systemTitle;
+        document.title = `${payload.systemTitle} - 多账号保活控制台`;
+      }
+      if (payload.systemSubtitle) {
+        const subtitleEl = document.querySelector(".title-group p");
+        if (subtitleEl) subtitleEl.innerText = payload.systemSubtitle;
+      }
+    } else {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.error || "更新失败", "error");
+    }
+  } catch (e) {
+    showToast("网络请求异常: " + e.message, "error");
+  }
+}
+
+// 8.5 个人消息通知推送设置 (所有用户通用)
+async function openUserNotifyModal() {
+  try {
+    const res = await authFetch("/api/user/notify");
+    if (!res.ok) {
+      showToast("获取个人通知设置失败", "error");
+      return;
+    }
+    const notify = await res.json();
+
+    if (document.getElementById("user-notify-enabled")) {
+      document.getElementById("user-notify-enabled").checked = !!notify.enabled;
+    }
+    if (document.getElementById("user-notify-channel")) {
+      document.getElementById("user-notify-channel").value = notify.channel || "webhook";
+    }
+    if (document.getElementById("user-notify-token")) {
+      document.getElementById("user-notify-token").value = notify.webhookUrl || "";
+    }
+    if (document.getElementById("user-notify-title-tpl")) {
+      document.getElementById("user-notify-title-tpl").value = notify.customTitleTemplate || "";
+    }
+    if (document.getElementById("user-notify-content-tpl")) {
+      document.getElementById("user-notify-content-tpl").value = notify.customContentTemplate || "";
+    }
+    onUserNotifyChannelChange(false);
+    openModal("user-notify-modal");
+  } catch (e) {
+    showToast("获取个人通知设置失败: " + e.message, "error");
+  }
+}
+
+function onUserNotifyChannelChange(isUserSwitch = true) {
+  const channelEl = document.getElementById("user-notify-channel");
+  const label = document.getElementById("user-notify-token-label");
+  const input = document.getElementById("user-notify-token");
+  if (!channelEl || !label || !input) return;
+
+  const channel = channelEl.value;
+  const currentVal = input.value.trim();
+
+  // 若用户主动在下拉列表中切换通道类型，且当前输入框中残留了其他通道的特征链接，自动清空避免跨渠道残留
+  if (isUserSwitch && currentVal) {
+    const isOtherChannelUrl = 
+      (channel !== "feishu" && currentVal.includes("open.feishu.cn")) ||
+      (channel !== "qywx" && currentVal.includes("qyapi.weixin.qq.com")) ||
+      (channel !== "dingtalk" && currentVal.includes("oapi.dingtalk.com")) ||
+      (channel !== "bark" && currentVal.includes("api.day.app")) ||
+      (channel !== "pushplus" && currentVal.includes("pushplus.plus")) ||
+      (channel !== "serverchan" && currentVal.includes("ftqq.com")) ||
+      (channel !== "telegram" && currentVal.includes("api.telegram.org"));
+    if (isOtherChannelUrl) {
+      input.value = "";
+    }
+  }
 
   if (channel === "qywx") {
     label.innerText = "企业微信机器人 Webhook 地址";
     input.placeholder = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx";
+  } else if (channel === "dingtalk") {
+    label.innerText = "钉钉机器人 Webhook 地址";
+    input.placeholder = "https://oapi.dingtalk.com/robot/send?access_token=xxxx";
+  } else if (channel === "feishu") {
+    label.innerText = "飞书机器人 Webhook 地址";
+    input.placeholder = "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx";
   } else if (channel === "serverchan") {
     label.innerText = "Server酱 SendKey";
-    input.placeholder = "请输入 SendKey";
+    input.placeholder = "请输入 SendKey (SCTxxxx)";
   } else if (channel === "pushplus") {
     label.innerText = "PushPlus Token";
     input.placeholder = "请输入 PushPlus Token";
@@ -1654,71 +2534,103 @@ function onNotifyChannelChange() {
   }
 }
 
-async function saveSettings() {
-  const customTitle = document.getElementById("set-system-title") ? document.getElementById("set-system-title").value.trim() : "";
-  const payload = {
-    systemTitle: customTitle || "天翼云自动化控制中心",
-    keepAliveSeconds: parseInt(document.getElementById("set-keepalive-sec").value) || 60,
-    pulseIntervalSeconds: Math.min(3300, Math.max(10, parseInt(document.getElementById("set-pulse-sec") ? document.getElementById("set-pulse-sec").value : 30) || 30)),
-    allowRegistration: document.getElementById("set-allow-reg") ? document.getElementById("set-allow-reg").checked : true,
-    defaultQuota: document.getElementById("set-default-quota") ? parseInt(document.getElementById("set-default-quota").value) || 2 : 2,
-    cron: {
-      executeTime: document.getElementById("cron-task-time") ? document.getElementById("cron-task-time").value.trim() : "08:00",
-      enableSubCron: document.getElementById("cron-enable-sub") ? document.getElementById("cron-enable-sub").checked : false,
-      signCron: document.getElementById("cron-sign") ? document.getElementById("cron-sign").value.trim() : "",
-      aiChatCron: document.getElementById("cron-aichat") ? document.getElementById("cron-aichat").value.trim() : "",
-      cloudHangCron: document.getElementById("cron-hang") ? document.getElementById("cron-hang").value.trim() : "",
-      redeemCron: document.getElementById("cron-redeem") ? document.getElementById("cron-redeem").value.trim() : ""
-    },
-    notify: {
-      enabled: document.getElementById("notify-enabled").checked,
-      channel: document.getElementById("notify-channel").value,
-      webhookUrl: document.getElementById("notify-token").value.trim(),
-      customTitleTemplate: document.getElementById("notify-title-tpl").value.trim(),
-      customContentTemplate: document.getElementById("notify-content-tpl").value.trim()
+async function testUserNotify() {
+  const channel = document.getElementById("user-notify-channel") ? document.getElementById("user-notify-channel").value : "webhook";
+  const webhookUrl = document.getElementById("user-notify-token") ? document.getElementById("user-notify-token").value.trim() : "";
+  const customTitleTemplate = document.getElementById("user-notify-title-tpl") ? document.getElementById("user-notify-title-tpl").value.trim() : "";
+  const customContentTemplate = document.getElementById("user-notify-content-tpl") ? document.getElementById("user-notify-content-tpl").value.trim() : "";
+
+  if (!webhookUrl) {
+    showToast("请先输入推送地址或 Token", "error");
+    return;
+  }
+
+  showToast("正在发送测试推送...", "info");
+  try {
+    const res = await authFetch("/api/user/notify/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel, webhookUrl, customTitleTemplate, customContentTemplate })
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast("🎉 推送成功！已向您的专属通道发送测试卡片", "success");
+    } else {
+      showToast(`推送失败: ${data.message || '网络无法连通或已被系统安全拦截'}`, "error");
     }
+  } catch (e) {
+    showToast("请求异常: " + e.message, "error");
+  }
+}
+
+async function saveUserNotify() {
+  const payload = {
+    enabled: document.getElementById("user-notify-enabled") ? document.getElementById("user-notify-enabled").checked : false,
+    channel: document.getElementById("user-notify-channel") ? document.getElementById("user-notify-channel").value : "webhook",
+    webhookUrl: document.getElementById("user-notify-token") ? document.getElementById("user-notify-token").value.trim() : "",
+    customTitleTemplate: document.getElementById("user-notify-title-tpl") ? document.getElementById("user-notify-title-tpl").value.trim() : "",
+    customContentTemplate: document.getElementById("user-notify-content-tpl") ? document.getElementById("user-notify-content-tpl").value.trim() : ""
   };
 
   try {
-    const res = await authFetch("/api/settings", {
+    const res = await authFetch("/api/user/notify", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
-    if (res.ok) {
-      showToast("系统设置已更新！Webhook 已生效", "success");
-      closeModal("settings-modal");
-      if (payload.systemTitle) {
-        const titleEl = document.getElementById("main-system-title");
-        if (titleEl) titleEl.innerText = payload.systemTitle;
-        document.title = `${payload.systemTitle} - 多账号保活控制台`;
-      }
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast("个人通知设置已成功保存！", "success");
+      closeModal("user-notify-modal");
     } else {
-      showToast("更新失败", "error");
+      showToast(data.error || "保存失败", "error");
     }
   } catch (e) {
     showToast("网络请求异常: " + e.message, "error");
   }
 }
-// 9. 实时控制台日志与分类过滤
-let allReceivedLogs = [];
-let activeLogFilter = 'tasks'; // 默认优先聚焦任务反馈，避免被心跳淹没
+
+// 9. 实时控制台日志与分类过滤 (双维过滤：平台筛选 + 业务事件)
+function switchPlatformFilter(platform) {
+  activePlatformFilter = platform;
+  const pAll = document.getElementById('tab-platform-all');
+  const pCt = document.getElementById('tab-platform-ctyun');
+  const pYd = document.getElementById('tab-platform-ydpc');
+  if (pAll) pAll.className = platform === 'all' ? 'btn btn-sm btn-primary' : 'btn btn-sm';
+  if (pCt) pCt.className = platform === 'ctyun' ? 'btn btn-sm btn-primary' : 'btn btn-sm';
+  if (pYd) pYd.className = platform === 'ydpc' ? 'btn btn-sm btn-primary' : 'btn btn-sm';
+  renderFilteredLogs();
+}
 
 function switchLogFilter(filterType) {
   activeLogFilter = filterType;
-  document.getElementById('tab-tasks').className = filterType === 'tasks' ? 'btn btn-sm btn-primary' : 'btn btn-sm';
-  document.getElementById('tab-heartbeat').className = filterType === 'heartbeat' ? 'btn btn-sm btn-primary' : 'btn btn-sm';
-  document.getElementById('tab-all').className = filterType === 'all' ? 'btn btn-sm btn-primary' : 'btn btn-sm';
+  const tTasks = document.getElementById('tab-tasks');
+  const tHeart = document.getElementById('tab-heartbeat');
+  const tAll = document.getElementById('tab-all');
+  if (tTasks) tTasks.className = filterType === 'tasks' ? 'btn btn-sm btn-primary' : 'btn btn-sm';
+  if (tHeart) tHeart.className = filterType === 'heartbeat' ? 'btn btn-sm btn-primary' : 'btn btn-sm';
+  if (tAll) tAll.className = filterType === 'all' ? 'btn btn-sm btn-primary' : 'btn btn-sm';
   renderFilteredLogs();
 }
 
 function renderFilteredLogs() {
   const logBox = document.getElementById("log-content");
+  if (!logBox) return;
   logBox.innerHTML = "";
+
   const filtered = allReceivedLogs.filter(item => {
+    // 1. 平台维度过滤
+    const isSystemOrAuth = item.source === 'System' || item.source === 'Auth' || item.source === 'Admin' || item.source === 'Notify';
+    if (!isSystemOrAuth) {
+      if (activePlatformFilter === 'ctyun' && item.platform !== 'ctyun') return false;
+      if (activePlatformFilter === 'ydpc' && item.platform !== 'ydpc') return false;
+    }
+
+    // 2. 业务事件维度过滤
+    const isHeartbeat = item.source === 'Heartbeat' || item.source === 'CAG' || item.source === 'KeepAlive' || item.source === 'SOHO';
     if (activeLogFilter === 'all') return true;
-    if (activeLogFilter === 'heartbeat') return item.source === 'Heartbeat';
-    if (activeLogFilter === 'tasks') return item.source !== 'Heartbeat';
+    if (activeLogFilter === 'heartbeat') return isHeartbeat;
+    if (activeLogFilter === 'tasks') return !isHeartbeat;
     return true;
   });
 
@@ -1959,8 +2871,6 @@ function handleFileSelected(input) {
 // ==========================================
 // 多用户系统与管理员配额控制
 // ==========================================
-let authMode = "login";
-
 function openAuthModal() {
   document.getElementById("auth-username").value = "";
   document.getElementById("auth-password").value = "";
@@ -2153,6 +3063,13 @@ async function deleteUserAccount(userId, username) {
 function openChangePwdModal() {
   document.getElementById("new-user-pwd").value = "";
   document.getElementById("confirm-user-pwd").value = "";
+  
+  // 回显头像设置
+  if (document.getElementById("custom-user-avatar")) {
+    document.getElementById("custom-user-avatar").value = currentUser?.avatar || "";
+  }
+  updateAvatarPreview(currentUser?.avatar || (currentUser?.username || "A")[0].toUpperCase());
+
   const adminGroup = document.getElementById("admin-change-username-group");
   if (adminGroup) {
     const isAdmin = currentUser && currentUser.role === "admin";
@@ -2162,6 +3079,46 @@ function openChangePwdModal() {
     }
   }
   openModal("change-pwd-modal");
+}
+
+function selectPresetAvatar(emoji) {
+  const input = document.getElementById("custom-user-avatar");
+  if (input) input.value = emoji;
+  updateAvatarPreview(emoji);
+}
+
+function updateAvatarPreview(text) {
+  const preview = document.getElementById("current-avatar-preview");
+  if (!preview) return;
+  const val = (text || '').trim();
+  preview.innerText = val ? val.slice(0, 2) : ((currentUser?.username || "A")[0].toUpperCase());
+}
+
+async function submitChangeAvatar() {
+  const customAvatar = document.getElementById("custom-user-avatar") ? document.getElementById("custom-user-avatar").value.trim() : "";
+  if (!customAvatar) {
+    showToast("请输入或选择一个头像内容", "error");
+    return;
+  }
+
+  try {
+    const res = await authFetch("/api/auth/change-avatar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ avatar: customAvatar })
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      if (currentUser) currentUser.avatar = customAvatar;
+      const headerAvatar = document.getElementById("header-avatar");
+      if (headerAvatar) headerAvatar.innerText = customAvatar.slice(0, 2);
+      showToast("🎉 头像个性化设置已保存！", "success");
+    } else {
+      showToast(data.error || "头像设置失败", "error");
+    }
+  } catch (e) {
+    showToast("请求网络异常: " + e.message, "error");
+  }
 }
 
 async function submitChangeUsername() {
@@ -2254,4 +3211,13 @@ async function submitAdminUserPassword() {
     showToast("请求异常: " + e.message, "error");
   }
 }
+
+// 响应式窗口缩放防抖自动重新排版
+let resizeGridTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeGridTimer);
+  resizeGridTimer = setTimeout(() => {
+    if (currentUser) renderAccounts();
+  }, 250);
+});
 

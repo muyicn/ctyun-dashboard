@@ -51,11 +51,12 @@ class AuthManager {
       this.sessions.delete(token);
       return null;
     }
-    // 动态同步最新用户的 maxQuota 和 role
+    // 动态同步最新用户的 maxQuota、role 和 avatar
     const user = this.getUserById(session.userId);
     if (user) {
       session.role = user.role;
       session.maxQuota = user.maxQuota;
+      session.avatar = user.avatar || '';
     }
     return session;
   }
@@ -78,7 +79,8 @@ class AuthManager {
         id: user.id,
         username: user.username,
         role: user.role,
-        maxQuota: user.maxQuota
+        maxQuota: user.maxQuota,
+        avatar: user.avatar || ''
       }
     };
   }
@@ -108,6 +110,7 @@ class AuthManager {
       passwordHash: hashPassword(password),
       role: 'user',
       maxQuota: defaultQuota,
+      avatar: '',
       createdAt: new Date().toISOString()
     };
 
@@ -122,7 +125,8 @@ class AuthManager {
         id: newUser.id,
         username: newUser.username,
         role: newUser.role,
-        maxQuota: newUser.maxQuota
+        maxQuota: newUser.maxQuota,
+        avatar: newUser.avatar || ''
       }
     };
   }
@@ -130,6 +134,26 @@ class AuthManager {
   getUserById(userId) {
     const cfg = this.configManager.config;
     return (cfg.users || []).find(u => u.id === userId);
+  }
+
+  getUserNotify(userId) {
+    const user = this.getUserById(userId);
+    return user?.notify || null;
+  }
+
+  updateUserNotify(userId, notifyConfig) {
+    const cfg = this.configManager.config;
+    const user = (cfg.users || []).find(u => u.id === userId);
+    if (!user) return false;
+    user.notify = {
+      enabled: !!notifyConfig?.enabled,
+      channel: notifyConfig?.channel || 'webhook',
+      webhookUrl: String(notifyConfig?.webhookUrl || '').trim(),
+      customTitleTemplate: String(notifyConfig?.customTitleTemplate || '').trim(),
+      customContentTemplate: String(notifyConfig?.customContentTemplate || '').trim()
+    };
+    this.configManager.saveConfig();
+    return true;
   }
 
   getUsers() {
@@ -161,6 +185,19 @@ class AuthManager {
     const user = (cfg.users || []).find(u => u.id === userId);
     if (!user) return false;
     user.passwordHash = hashPassword(newPassword);
+    this.configManager.saveConfig();
+    return true;
+  }
+
+  updateUserAvatar(userId, avatar) {
+    const cfg = this.configManager.config;
+    const user = (cfg.users || []).find(u => u.id === userId);
+    if (!user) return false;
+    user.avatar = String(avatar || '').trim();
+    // 同步活跃会话
+    for (const [token, s] of this.sessions.entries()) {
+      if (s.userId === userId) s.avatar = user.avatar;
+    }
     this.configManager.saveConfig();
     return true;
   }

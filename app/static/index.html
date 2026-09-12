@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>天翼云电脑多账号管理与保活控制台</title>
+  <title>天翼云/移动云电脑保活签到中心</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -13,8 +13,8 @@
       <div class="logo-group">
         <div class="logo-icon">☁️</div>
         <div class="title-group">
-          <h1 id="main-system-title">天翼云自动化控制中心</h1>
-          <p style="font-size: 13px; color: var(--text-muted); margin-top: 2px;">多账号长连接保活守护 · 每日签到打卡 · 智能挂机 · 自动兑换</p>
+          <h1 id="main-system-title">天翼云/移动云电脑保活签到中心</h1>
+          <p style="font-size: 13px; color: var(--text-muted); margin-top: 2px;">多账号长连接保活守护 · 多运营商支持 · 每日签到打卡 · 智能挂机</p>
         </div>
       </div>
       <div class="header-actions">
@@ -25,25 +25,26 @@
         <div id="logged-actions-group" class="hidden" style="display: flex; align-items: center; gap: 10px;">
           <button class="btn btn-primary" onclick="openAddAccountModal()">➕ 添加云电脑</button>
 
-          <!-- 系统设置下拉菜单栏 -->
-          <div class="user-dropdown" id="settings-dropdown-container">
-            <button class="btn" onclick="toggleSettingsMenu()">⚙️ 系统设置 ▾</button>
+          <!-- 系统管理下拉菜单栏 (仅超级管理员可见) -->
+          <div class="user-dropdown hidden" id="settings-dropdown-container">
+            <button class="btn" onclick="toggleSettingsMenu()">⚙️ 系统管理 ▾</button>
             <div class="dropdown-menu hidden" id="settings-dropdown-menu">
-              <button class="dropdown-item" onclick="openSettingsModal(); hideSettingsMenu();">⚙️ 系统与定时调度</button>
+              <button class="dropdown-item" onclick="openSettingsModal(); hideSettingsMenu();">⚙️ 全局系统与平台调度</button>
+              <button class="dropdown-item" onclick="openAdminUsersModal(); hideSettingsMenu();">👥 用户与配额管理</button>
               <button class="dropdown-item" onclick="restartKeeper(); hideSettingsMenu();">🔄 重启保活</button>
               <button class="dropdown-item" onclick="openBackupModal(); hideSettingsMenu();">📦 备份与还原 (JSON)</button>
             </div>
           </div>
 
-          <!-- 用户头像与收拢下拉菜单 (只保留修改密码/用户名、用户与配额管理及退出登录) -->
+          <!-- 用户头像与收拢下拉菜单 (所有用户通用：个人通知、修改密码、退出登录) -->
           <div class="user-dropdown" id="user-dropdown-container">
             <div class="avatar-btn" id="header-avatar" onclick="toggleUserMenu()" title="个人中心">U</div>
             <div class="dropdown-menu hidden" id="user-dropdown-menu">
               <div style="padding: 8px 16px; font-size: 12px; color: var(--text-muted); border-bottom: 1px solid var(--border);">
                 登录身份: <span id="dropdown-username" style="font-weight: 700; color: #0f172a;">admin</span>
               </div>
+              <button class="dropdown-item" onclick="openUserNotifyModal(); hideUserMenu();">🔔 个人消息通知设置</button>
               <button class="dropdown-item" onclick="openChangePwdModal(); hideUserMenu();">🔒 修改密码/用户名</button>
-              <button class="dropdown-item hidden" id="menu-admin-users" onclick="openAdminUsersModal(); hideUserMenu();">👥 用户与配额管理</button>
               <div class="dropdown-divider"></div>
               <button class="dropdown-item" onclick="logoutUser(); hideUserMenu();" style="color: var(--danger);">🚪 退出登录</button>
             </div>
@@ -89,7 +90,15 @@
       <div class="section-title">
         <span>📋</span> 账号管理与自动化配置
       </div>
-      <button class="btn-refresh" onclick="loadAccounts()">🔄 刷新列表</button>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <!-- 平台视图切换 Tab (双云平台并存时自动智能呈现) -->
+        <div id="account-view-tabs-group" style="display: none; gap: 4px; background: #f1f5f9; padding: 2px 4px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
+          <button class="btn btn-sm btn-primary" id="view-tab-all" onclick="switchAccountViewTab('all')">🌐 全部设备</button>
+          <button class="btn btn-sm" id="view-tab-ctyun" onclick="switchAccountViewTab('ctyun')">☁️ 天翼云电脑</button>
+          <button class="btn btn-sm" id="view-tab-ydpc" onclick="switchAccountViewTab('ydpc')">📱 移动云电脑</button>
+        </div>
+        <button class="btn-refresh" onclick="loadAccounts()">🔄 刷新列表</button>
+      </div>
     </div>
 
     <div class="accounts-grid" id="accounts-container">
@@ -105,12 +114,21 @@
             <div class="mac-dot mac-dot-yellow"></div>
             <div class="mac-dot mac-dot-green"></div>
           </div>
-          <span style="font-weight: 600; font-size: 13px; margin-left: 6px;">实时控制台日志</span>
+          <span style="font-weight: 700; font-size: 13px; margin-left: 6px;">实时控制台日志</span>
           <span class="badge badge-online" id="log-status" style="margin-left: 4px;">已连接</span>
-          <div style="display: flex; gap: 6px; margin-left: 12px;">
-            <button class="btn btn-sm btn-primary" id="tab-tasks" onclick="switchLogFilter('tasks')">🎯 任务反馈</button>
+          
+          <!-- 平台快速过滤子按钮 -->
+          <div style="display: flex; gap: 4px; margin-left: 10px; background: #f1f5f9; padding: 2px 3px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
+            <button class="btn btn-sm btn-primary" id="tab-platform-all" onclick="switchPlatformFilter('all')">🌐 全部</button>
+            <button class="btn btn-sm" id="tab-platform-ctyun" onclick="switchPlatformFilter('ctyun')">☁️ 天翼云</button>
+            <button class="btn btn-sm" id="tab-platform-ydpc" onclick="switchPlatformFilter('ydpc')">📱 移动云</button>
+          </div>
+
+          <!-- 业务事件子按钮 -->
+          <div style="display: flex; gap: 4px; margin-left: 6px;">
+            <button class="btn btn-sm btn-primary" id="tab-tasks" onclick="switchLogFilter('tasks')">🎯 任务</button>
             <button class="btn btn-sm" id="tab-heartbeat" onclick="switchLogFilter('heartbeat')">📡 心跳保活</button>
-            <button class="btn btn-sm" id="tab-all" onclick="switchLogFilter('all')">📄 全部日志</button>
+            <button class="btn btn-sm" id="tab-all" onclick="switchLogFilter('all')">📄 全部</button>
           </div>
         </div>
         <div style="display: flex; gap: 8px;">
@@ -124,82 +142,132 @@
     </div>
   </div>
 
-  <!-- 添加/编辑账号模态框 (支持官方扫码免密登录与密码登录双模式) -->
+  <!-- 添加/编辑账号模态框 (双云融合：天翼云 / 移动云) -->
   <div class="modal-backdrop hidden" id="account-modal">
     <div class="modal">
       <div class="modal-header">
-        <h3 id="modal-account-title">添加天翼云账号</h3>
+        <h3 id="modal-account-title">添加云电脑账号</h3>
         <button class="modal-close" onclick="closeModal('account-modal')">&times;</button>
       </div>
       <div class="modal-body">
         <input type="hidden" id="acc-id">
         
-        <!-- 登录方式切换 Tab -->
-        <div id="acc-login-tabs" style="display: flex; gap: 8px; margin-bottom: 10px; border-bottom: 1px solid var(--border); padding-bottom: 8px;">
-          <button type="button" class="btn btn-sm btn-primary" id="tab-btn-qrcode" onclick="switchAccountLoginTab('qrcode')">📱 手机 App 扫码一键登录 (推荐)</button>
-          <button type="button" class="btn btn-sm" id="tab-btn-pwd" onclick="switchAccountLoginTab('pwd')">🔑 手机号密码登录</button>
+        <!-- 平台选择 Tab -->
+        <div id="platform-tabs-container" style="display: flex; gap: 8px; margin-bottom: 10px; background: #f1f5f9; padding: 4px; border-radius: var(--radius); border: 1px solid var(--border);">
+          <button type="button" class="btn btn-sm btn-primary" id="platform-tab-ctyun" style="flex: 1; padding: 8px 0; font-weight: 700;" onclick="switchAddAccountPlatform('ctyun')">☁️ 天翼云电脑</button>
+          <button type="button" class="btn btn-sm" id="platform-tab-ydpc" style="flex: 1; padding: 8px 0; font-weight: 700;" onclick="switchAddAccountPlatform('ydpc')">📱 移动云电脑</button>
         </div>
 
-        <!-- 1. 扫码登录视图 -->
-        <div id="login-panel-qrcode" style="text-align: center; padding: 0;">
-          <div class="form-group" style="text-align: left; margin-bottom: 8px;">
-            <label style="margin-bottom: 2px;">账号备注名 (选填)</label>
-            <input type="text" class="form-control" id="qrcode-acc-name" placeholder="例如：主账号 / 上海电信 (留空则自动生成)">
+        <!-- ================= 1. 天翼云面板 ================= -->
+        <div id="panel-add-ctyun">
+          <!-- 登录方式切换 Tab -->
+          <div id="acc-login-tabs" style="display: flex; gap: 8px; margin-bottom: 10px; border-bottom: 1px solid var(--border); padding-bottom: 8px;">
+            <button type="button" class="btn btn-sm btn-primary" id="tab-btn-qrcode" onclick="switchAccountLoginTab('qrcode')">📱 手机 App 扫码一键登录 (推荐)</button>
+            <button type="button" class="btn btn-sm" id="tab-btn-pwd" onclick="switchAccountLoginTab('pwd')">🔑 手机号密码登录</button>
           </div>
-          <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 8px;">
-            请使用手机 <b>天翼云电脑 App</b> 或 <b>天翼账号</b> 扫一扫授权登录，免输验证码与短信！
-          </div>
-          <div id="qrcode-wrapper" style="display: inline-block; padding: 10px; background: #ffffff; border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); min-width: 170px; min-height: 170px;">
-            <img id="acc-qrcode-img" src="" style="width: 160px; height: 160px; display: none;">
-            <div id="acc-qrcode-loading" style="width: 160px; height: 160px; display: flex; align-items: center; justify-content: center; font-size: 13px; color: var(--text-muted);">
-              正在生成官方二维码...
+
+          <!-- 1.1 扫码登录视图 -->
+          <div id="login-panel-qrcode" style="text-align: center; padding: 0;">
+            <div class="form-group" style="text-align: left; margin-bottom: 8px;">
+              <label style="margin-bottom: 2px;">账号备注名 (选填)</label>
+              <input type="text" class="form-control" id="qrcode-acc-name" placeholder="例如：主账号 / 上海电信 (留空则自动生成)">
+            </div>
+            <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 8px;">
+              请使用手机 <b>天翼云电脑 App</b> 或 <b>天翼账号</b> 扫一扫授权登录，免输验证码与短信！
+            </div>
+            <div id="qrcode-wrapper" style="display: inline-block; padding: 10px; background: #ffffff; border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); min-width: 170px; min-height: 170px;">
+              <img id="acc-qrcode-img" src="" style="width: 160px; height: 160px; display: none;">
+              <div id="acc-qrcode-loading" style="width: 160px; height: 160px; display: flex; align-items: center; justify-content: center; font-size: 13px; color: var(--text-muted);">
+                正在生成官方二维码...
+              </div>
+            </div>
+            <div id="acc-qrcode-hint" style="margin-top: 6px; font-size: 12px; color: #2563eb; font-weight: 600;">
+              等待扫码确认中...
             </div>
           </div>
-          <div id="acc-qrcode-hint" style="margin-top: 6px; font-size: 12px; color: #2563eb; font-weight: 600;">
-            等待扫码确认中...
+
+          <!-- 1.2 账号密码登录视图 -->
+          <div id="login-panel-pwd" class="hidden">
+            <div class="form-group">
+              <label>账号备注名</label>
+              <input type="text" class="form-control" id="acc-name" placeholder="例如：天翼主账号 / 小号1">
+            </div>
+            <div class="form-group">
+              <label>手机号 / 天翼账号 <span style="color:red">*</span></label>
+              <input type="text" class="form-control" id="acc-user" placeholder="请输入天翼云绑定的手机号">
+            </div>
+            <div class="form-group">
+              <label>密码 <span style="color:red">*</span></label>
+              <input type="password" class="form-control" id="acc-password" placeholder="请输入登录密码">
+            </div>
+            <div class="form-group">
+              <label>图形验证码 <span style="color:red">*</span></label>
+              <div style="display: flex; gap: 10px; align-items: center;">
+                <input type="text" class="form-control" id="acc-captcha-code" placeholder="输入4位验证码" maxlength="6" style="flex: 1; text-transform: uppercase;">
+                <div style="cursor: pointer; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; height: 38px; display: flex; align-items: center; background: #f8fafc;" onclick="refreshModalCaptcha()" title="点击换一张验证码">
+                  <img id="acc-captcha-img" src="" alt="点击刷新" style="height: 38px; min-width: 85px; display: none;">
+                  <span id="acc-captcha-loading" style="font-size: 12px; color: var(--text-muted); padding: 0 10px;">点击获取验证码</span>
+                </div>
+              </div>
+              <input type="hidden" id="acc-challenge-id">
+              <input type="hidden" id="acc-challenge-code">
+              <div class="form-text">输入手机号后点击图片即可获取天翼云官方验证码。</div>
+            </div>
+            <div class="form-group">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <label>设备码 (DeviceCode)</label>
+                <a href="javascript:void(0)" onclick="generateNewDeviceCode()" style="font-size: 12px; color: var(--accent);">重新随机生成</a>
+              </div>
+              <input type="text" class="form-control" id="acc-device-code" placeholder="留空则系统自动随机生成32位持久设备码">
+            </div>
           </div>
         </div>
 
-        <!-- 2. 账号密码登录视图 -->
-        <div id="login-panel-pwd" class="hidden">
+        <!-- ================= 2. 移动云面板 ================= -->
+        <div id="panel-add-ydpc" class="hidden">
           <div class="form-group">
             <label>账号备注名</label>
-            <input type="text" class="form-control" id="acc-name" placeholder="例如：主账号 / 小号1">
+            <input type="text" class="form-control" id="ydpc-name" placeholder="例如：移动家庭主号 / 子云电脑">
           </div>
           <div class="form-group">
-            <label>手机号 / 天翼账号 <span style="color:red">*</span></label>
-            <input type="text" class="form-control" id="acc-user" placeholder="请输入天翼云绑定的手机号">
+            <label>账号类型 <span style="color:red">*</span></label>
+            <select class="form-control" id="ydpc-account-type">
+              <option value="main">👑 和家亲主账号 (可自动拉取名下所有子云电脑)</option>
+              <option value="sub">👤 独立分配子账号 (单台云电脑专属)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>手机号 / 账号名 <span style="color:red">*</span></label>
+            <input type="text" class="form-control" id="ydpc-user" placeholder="请输入中国移动手机号">
           </div>
           <div class="form-group">
             <label>密码 <span style="color:red">*</span></label>
-            <input type="password" class="form-control" id="acc-password" placeholder="请输入登录密码">
+            <input type="password" class="form-control" id="ydpc-password" placeholder="请输入移动云电脑登录密码">
           </div>
           <div class="form-group">
-            <label>图形验证码 <span style="color:red">*</span></label>
-            <div style="display: flex; gap: 10px; align-items: center;">
-              <input type="text" class="form-control" id="acc-captcha-code" placeholder="输入4位验证码" maxlength="6" style="flex: 1; text-transform: uppercase;">
-              <div style="cursor: pointer; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; height: 38px; display: flex; align-items: center; background: #f8fafc;" onclick="refreshModalCaptcha()" title="点击换一张验证码">
-                <img id="acc-captcha-img" src="" alt="点击刷新" style="height: 38px; min-width: 85px; display: none;">
-                <span id="acc-captcha-loading" style="font-size: 12px; color: var(--text-muted); padding: 0 10px;">点击获取验证码</span>
-              </div>
-            </div>
-            <input type="hidden" id="acc-challenge-id">
-            <input type="hidden" id="acc-challenge-code">
-            <div class="form-text">输入手机号后点击图片即可获取天翼云官方验证码（如看不清可直接点击图片换一张）。</div>
+            <label>保活心跳与握手周期</label>
+            <select class="form-control" id="ydpc-interval">
+              <option value="600">10 分钟 (标准推荐)</option>
+              <option value="1200">20 分钟</option>
+              <option value="1680">28 分钟 (极低功耗)</option>
+              <option value="3600">1 小时</option>
+            </select>
           </div>
-          <div class="form-group">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <label>设备码 (DeviceCode)</label>
-              <a href="javascript:void(0)" onclick="generateNewDeviceCode()" style="font-size: 12px; color: var(--accent);">重新随机生成</a>
+          <div class="form-group" style="margin-top: 4px;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <label class="switch">
+                <input type="checkbox" id="ydpc-autoboot" checked>
+                <span class="slider"></span>
+              </label>
+              <span style="font-size: 13px; font-weight: 600;">启用自动开机守护 (检测到机器关机自动下发唤醒)</span>
             </div>
-            <input type="text" class="form-control" id="acc-device-code" placeholder="留空则系统自动随机生成32位持久设备码">
-            <div class="form-text">提示：持久化设备码可避免每次登录被风控要求短信验证码。</div>
           </div>
         </div>
       </div>
       <div class="modal-footer">
         <button class="btn" onclick="closeModal('account-modal')">取消</button>
-        <button class="btn btn-primary" id="btn-save-account-pwd" onclick="saveAccount()" style="display: none;">保存账号</button>
+        <button class="btn btn-primary" id="btn-save-account-pwd" onclick="saveAccount()" style="display: none;">保存天翼云账号</button>
+        <button class="btn btn-primary" id="btn-save-account-ydpc" onclick="saveYdpcAccount()" style="display: none;">保存移动云账号</button>
       </div>
     </div>
   </div>
@@ -412,11 +480,11 @@
     </div>
   </div>
 
-  <!-- 系统设置模态框 -->
+  <!-- 全局系统与平台调度设置模态框 (仅超级管理员) -->
   <div class="modal-backdrop hidden" id="settings-modal">
     <div class="modal">
       <div class="modal-header">
-        <h3>⚙️ 全局系统与定时调度设置</h3>
+        <h3>⚙️ 全局系统与平台调度设置</h3>
         <button class="modal-close" onclick="closeModal('settings-modal')">&times;</button>
       </div>
       <div class="modal-body">
@@ -475,8 +543,13 @@
         <h4 style="font-size: 14px; margin-top: 14px; color: var(--accent);">🏷️ 平台与品牌个性化</h4>
         <div class="form-group">
           <label>控制台主标题名称</label>
-          <input type="text" class="form-control" id="set-system-title" placeholder="天翼云自动化控制中心">
+          <input type="text" class="form-control" id="set-system-title" placeholder="天翼云/移动云电脑保活签到中心">
           <div class="form-text">自定义顶部主标题，管理员修改后全局即时同步生效。</div>
+        </div>
+        <div class="form-group">
+          <label>控制台副标题名称</label>
+          <input type="text" class="form-control" id="set-system-subtitle" placeholder="多账号长连接保活守护 · 多运营商支持 · 每日签到打卡 · 智能挂机">
+          <div class="form-text">自定义主标题下方的功能特性副标题，管理员修改后全局即时同步生效。</div>
         </div>
 
         <h4 style="font-size: 14px; margin-top: 14px; color: var(--accent);">👥 多用户开放注册与默认配额</h4>
@@ -492,50 +565,69 @@
         <div class="form-group">
           <label>普通用户默认添加云电脑配额上限 (台)</label>
           <input type="number" class="form-control" id="set-default-quota" value="2" min="1">
-          <div class="form-text">新用户注册后默认允许添加的云电脑最大数量，管理员可在“用户配额管理”随时提高或降低。</div>
+          <div class="form-text">新用户注册后默认允许添加的云电脑最大数量，管理员可在“用户与配额管理”随时提高或降低。</div>
         </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('settings-modal')">取消</button>
+        <button class="btn btn-primary" onclick="saveSettings()">保存系统配置</button>
+      </div>
+    </div>
+  </div>
 
-        <h4 style="font-size: 14px; margin-top: 14px; color: var(--accent);">🔔 消息通知推送 (可选)</h4>
+  <!-- 个人消息通知推送模态框 (所有用户通用，包含管理员作为机主) -->
+  <div class="modal-backdrop hidden" id="user-notify-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>🔔 个人消息通知推送设置</h3>
+        <button class="modal-close" onclick="closeModal('user-notify-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px; line-height: 1.5;">
+          配置仅推送给您个人的专属通知通道。系统将仅向此通道推送<b>属于您名下云电脑</b>的每日任务达成、积分变动、登录失效告警等信息。
+        </p>
         <div class="form-group">
           <div style="display: flex; align-items: center; gap: 10px;">
             <label class="switch">
-              <input type="checkbox" id="notify-enabled">
+              <input type="checkbox" id="user-notify-enabled">
               <span class="slider"></span>
             </label>
-            <span style="font-size: 13px;">开启任务结果消息推送</span>
+            <span style="font-size: 13px; font-weight: 600;">开启个人消息推送</span>
           </div>
         </div>
         <div class="form-group">
           <label>推送渠道</label>
-          <select class="form-control" id="notify-channel" onchange="onNotifyChannelChange()">
+          <select class="form-control" id="user-notify-channel" onchange="onUserNotifyChannelChange(true)">
             <option value="webhook">通用 Webhook (JSON)</option>
             <option value="qywx">企业微信机器人 (WeChat Work)</option>
+            <option value="dingtalk">钉钉机器人 (DingTalk Webhook)</option>
+            <option value="feishu">飞书机器人 (Feishu / Lark Webhook)</option>
             <option value="serverchan">Server 酱 (Turbo)</option>
             <option value="pushplus">PushPlus (推送加)</option>
             <option value="bark">Bark (iOS)</option>
             <option value="telegram">Telegram 机器人</option>
           </select>
         </div>
-        <div class="form-group" id="group-notify-token">
-          <label id="notify-token-label">Webhook URL</label>
-          <input type="text" class="form-control" id="notify-token" placeholder="请输入对应 Key 或 URL">
+        <div class="form-group" id="group-user-notify-token">
+          <label id="user-notify-token-label">Webhook URL</label>
+          <input type="text" class="form-control" id="user-notify-token" placeholder="请输入对应 Key 或 URL">
         </div>
         <div class="form-group">
           <label>自定义通知标题模板 (留空默认)</label>
-          <input type="text" class="form-control" id="notify-title-tpl" placeholder="{title} - {account}">
+          <input type="text" class="form-control" id="user-notify-title-tpl" placeholder="{title} - {account}">
         </div>
         <div class="form-group">
           <label>自定义通知内容模板 (留空默认)</label>
-          <textarea class="form-control" id="notify-content-tpl" rows="2" placeholder="{content}"></textarea>
+          <textarea class="form-control" id="user-notify-content-tpl" rows="2" placeholder="{content}"></textarea>
           <div class="form-text">支持插值变量：<code>{title}</code>、<code>{content}</code>、<code>{account}</code>、<code>{task}</code>、<code>{status}</code>、<code>{time}</code></div>
         </div>
         <div style="display:flex; justify-content:flex-end; margin-top:4px;">
-          <button class="btn btn-sm btn-success" type="button" onclick="testNotification()">📨 立即测试推送</button>
+          <button class="btn btn-sm btn-success" type="button" onclick="testUserNotify()">📨 立即测试推送</button>
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn" onclick="closeModal('settings-modal')">取消</button>
-        <button class="btn btn-primary" onclick="saveSettings()">保存系统配置</button>
+        <button class="btn" onclick="closeModal('user-notify-modal')">取消</button>
+        <button class="btn btn-primary" onclick="saveUserNotify()">保存个人推送设置</button>
       </div>
     </div>
   </div>
@@ -589,8 +681,8 @@
         <button class="modal-close" type="button" onclick="closeModal('auth-modal')">&times;</button>
       </div>
       <form onsubmit="event.preventDefault(); submitAuth();">
-        <div class="modal-body">
-          <div style="display: flex; gap: 10px; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 6px;">
+        <div class="modal-body" style="gap: 18px; padding-top: 24px;">
+          <div style="display: flex; gap: 10px; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 8px;">
             <button type="button" class="btn btn-sm btn-primary" id="btn-auth-tab-login" onclick="switchAuthMode('login')">用户登录</button>
             <button type="button" class="btn btn-sm" id="btn-auth-tab-reg" onclick="switchAuthMode('register')">新用户注册</button>
           </div>
@@ -625,6 +717,29 @@
           <div style="display: flex; gap: 8px; margin-top: 6px;">
             <input type="text" class="form-control" id="new-admin-username" placeholder="输入新管理员用户名">
             <button class="btn btn-sm btn-primary" onclick="submitChangeUsername()" style="white-space: nowrap;">保存用户名</button>
+          </div>
+        </div>
+
+        <!-- 个性化头像修改 -->
+        <div class="form-group" style="background: #f8fafc; padding: 14px; border-radius: var(--radius); border: 1px solid var(--border); margin-bottom: 8px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <label style="font-weight: 700; color: #0f172a; font-size: 13px; margin-bottom: 0;">个性化头像设置</label>
+            <div id="current-avatar-preview" style="width: 36px; height: 36px; border-radius: 50%; background: #0f172a; color: #ffffff; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700; box-shadow: 0 2px 6px rgba(0,0,0,0.15);">A</div>
+          </div>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;" id="avatar-presets-container">
+            <button type="button" class="avatar-preset-btn" onclick="selectPresetAvatar('👨‍💻')">👨‍💻</button>
+            <button type="button" class="avatar-preset-btn" onclick="selectPresetAvatar('🤖')">🤖</button>
+            <button type="button" class="avatar-preset-btn" onclick="selectPresetAvatar('👑')">👑</button>
+            <button type="button" class="avatar-preset-btn" onclick="selectPresetAvatar('🚀')">🚀</button>
+            <button type="button" class="avatar-preset-btn" onclick="selectPresetAvatar('⚡')">⚡</button>
+            <button type="button" class="avatar-preset-btn" onclick="selectPresetAvatar('🐱')">🐱</button>
+            <button type="button" class="avatar-preset-btn" onclick="selectPresetAvatar('🦊')">🦊</button>
+            <button type="button" class="avatar-preset-btn" onclick="selectPresetAvatar('🛡️')">🛡️</button>
+            <button type="button" class="avatar-preset-btn" onclick="selectPresetAvatar('🌟')">🌟</button>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <input type="text" class="form-control" id="custom-user-avatar" placeholder="自定义文字或 Emoji (例如 🌟 或 鹏)" maxlength="6" style="flex: 1;" oninput="updateAvatarPreview(this.value)">
+            <button type="button" class="btn btn-sm btn-primary" onclick="submitChangeAvatar()" style="white-space: nowrap;">保存头像</button>
           </div>
         </div>
 
@@ -705,10 +820,10 @@
 
     <!-- 底部版权与版本号 -->
     <footer style="margin-top: 32px; padding: 20px 0 10px 0; text-align: center; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 12.5px;">
-      <div>天翼云电脑可视化全功能多账号管理平台 · 纯协议超轻量架构</div>
+      <div>云电脑可视化全功能多账号管理平台 · 纯协议超轻量架构</div>
       <div style="margin-top: 6px;" id="footer-version-container">
         <span id="footer-version-badge" style="color: var(--text-muted); cursor: default;">
-          📌 当前版本: v2.0.2
+          📌 当前版本: v2.1
         </span>
       </div>
     </footer>
@@ -716,22 +831,23 @@
 
   <!-- 版本更新介绍模态框 -->
   <div class="modal-backdrop hidden" id="release-notes-modal">
-    <div class="modal" style="max-width: 600px;">
+    <div class="modal" style="max-width: 620px;">
       <div class="modal-header">
-        <h3>🚀 版本更新说明 (v2.0.2)</h3>
+        <h3>🚀 版本更新说明 (v2.1)</h3>
         <button class="modal-close" onclick="closeModal('release-notes-modal')">&times;</button>
       </div>
       <div class="modal-body" style="font-size: 13.5px; line-height: 1.7; color: #334155;">
         <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;">
-          <div style="font-weight: 700; color: #0f172a; font-size: 14.5px; margin-bottom: 4px;">✨ v2.0.2 重点特性概览</div>
-          <div style="color: #64748b; font-size: 12px;">发布时间：2026-09-09</div>
+          <div style="font-weight: 700; color: #0f172a; font-size: 14.5px; margin-bottom: 4px;">✨ v2.1 重点特性概览</div>
+          <div style="color: #64748b; font-size: 12px;">发布时间：2026-09-11</div>
         </div>
         <ul style="padding-left: 20px; display: flex; flex-direction: column; gap: 8px;">
-          <li><b>🛡️ 三位一体防冲突引擎</b>：全面升级握手前置拦截与 Type 119/120 信令监听。当你在 PC 或手机 App 打开云电脑时，后台 10ms 内极速主动避让，绝不互踢！</li>
-          <li><b>🖥️ 单账号多云电脑支持</b>：全形态兼容个人独立机、政企桌面池（POOL）与抢占式云电脑，同一账号名下多台机器独立展现、独立电源管理与直通访问。</li>
-          <li><b>📱 官方 App 扫码免密一键登录</b>：新增天翼云官方二维码授权登录，手机天翼云 App 扫一扫秒级完成绑定，免输验证码与短信。</li>
-          <li><b>⏱️ 智能脉冲保活机制</b>：未开启挂机或今日挂机达标后，系统转入 45 分钟极简脉冲待机，99% 时间释放连接通道给官方客户端。</li>
-          <li><b>⚡ 纯协议极致轻量化</b>：彻底剔除 Chromium 重型浏览器依赖，纯 原生协议连接，镜像仅约 20MB，飞牛/绿联等各类 NAS 极速运行。</li>
+          <li><b>📱 移动云电脑全量融合</b>：中国移动云电脑保活（SOHO REST 签名加密 + ZTEC CAG TCP 三阶段握手 + SC/ZTE 自适应开机），零 Python 依赖，与天翼云同台统一管理、统一配额。</li>
+          <li><b>🛡️ 多账号多机全量保活</b>：单账号名下多台云主机全部纳管保活。</li>
+          <li><b>🧩 网格自由排版</b>：账号卡片支持拖拽排序与行内留白放置（允许空位、不产生多余空行），布局状态按用户与平台视图持久化，刷新不走样。</li>
+          <li><b>🚫 无感刷新与滚动锁定</b>：全面重构为原地增量数据更新（In-Place Update），后台轮询不再整页重绘，彻底消除"刷着刷着跳回顶部"与操作被打断的问题。</li>
+          <li><b>🖥️ 设备硬件规格展示</b>：天翼云与移动云设备统一显示 设备 ID 与核心规格，按官方套餐版本智能映射，双云呈现完全对齐。</li>
+          <li><b>👥 多用户体系完善</b>：管理员/普通用户权限彻底解耦，全局调度设置仅管理员可见；每用户独立通知推送渠道（企业微信/钉钉/飞书/Bark 等 8 渠道）、独立头像与配额管理。</li>
         </ul>
       </div>
       <div class="modal-footer">
