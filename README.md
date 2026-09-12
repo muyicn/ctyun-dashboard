@@ -169,6 +169,15 @@ ctyun-dashboard/
 
 ---
 
+## 🙏 致谢
+
+本项目的移动云电脑与天翼云电脑协议实现，参考了以下优秀开源项目的研究成果，在此表示衷心感谢：
+
+- **[ydpc-keeplive](https://github.com/zhaoboy9692/ydpc-keeplive)** —— 中国移动云电脑保活脚本，本项目的移动云 SOHO 签名加密、CAG 握手与 SC/ZTE 开机引擎的协议逻辑参考自该项目，并以原生 Node.js 重新实现；
+- **[CtYun](https://github.com/leleji/CtYun)** —— 天翼云电脑协议研究项目，本项目在天翼云 REDQ 挑战应答与会话握手等底层协议细节上参考了其研究成果。
+
+---
+
 ## 🔒 安全规范
 
 1. **工业级加密**：所有云电脑账号密码及重要凭据均采用 AES-256-GCM 加密落盘；
