@@ -556,7 +556,7 @@ function buildAccountCardElement(acc, slotIndex) {
             </div>
           </div>
         </div>
-        <div style="display: flex; gap: 4px;">
+        <div style="display: flex; gap: 4px; align-items: center; flex-shrink: 0;">
           <button class="btn btn-sm" onclick="editAccount('${acc.id}')" title="编辑移动云账号">✏️</button>
           <button class="btn btn-sm btn-danger" onclick="deleteAccount('${acc.id}')" title="删除账号">🗑️</button>
         </div>
@@ -733,7 +733,7 @@ function buildAccountCardElement(acc, slotIndex) {
           </div>
         </div>
       </div>
-      <div style="display: flex; gap: 4px;">
+      <div style="display: flex; gap: 4px; align-items: center; flex-shrink: 0;">
         <button class="btn btn-sm" onclick="editAccount('${acc.id}')" title="编辑账号与重新验证">✏️</button>
         <button class="btn btn-sm btn-danger" onclick="deleteAccount('${acc.id}')" title="删除账号">🗑️</button>
       </div>

@@ -4354,7 +4354,7 @@ function rewardNeedsDesktop(prodId, prodType) {
       role: session.role,
       settings: session.role === 'admin' ? appConfig.settings : undefined,
       accounts: exportAccounts.map(a => ({
-        platform: a.platform || 'ctyun',
+        platform: a.platform || (a.accountType || (a.features && a.features.cagKeepAlive !== undefined) ? 'ydpc' : 'ctyun'),
         accountType: a.accountType,
         name: a.name,
         user: a.user,
@@ -4426,7 +4426,17 @@ function rewardNeedsDesktop(prodId, prodType) {
     for (const item of importAccounts) {
       if (!item.user) continue;
 
-      const isYdpc = item.platform === 'ydpc' || item.accountType === 'sub' || (Array.isArray(item.vms) && item.vms.length > 0);
+      // 智能全维度识别移动云账号：支持新旧版本备份文件、字母子账号、features特征以及名称关键字
+      const isYdpc = 
+        item.platform === 'ydpc' ||
+        item.accountType === 'sub' ||
+        item.accountType === 'main' ||
+        (item.features && (item.features.cagKeepAlive !== undefined || item.features.sohoHeartbeat !== undefined)) ||
+        item.keepaliveInterval !== undefined ||
+        (typeof item.name === 'string' && (item.name.includes('移动') || /ydpc/i.test(item.name))) ||
+        (typeof item.user === 'string' && (/^[a-zA-Z0-9_]{4,20}$/.test(item.user) && !/^\d{11}$/.test(item.user))) ||
+        (Array.isArray(item.vms) && item.vms.length > 0);
+
       const isQrAccount = !item.password && !isYdpc;
 
       // 如果是 merge，检查手机号是否已存在

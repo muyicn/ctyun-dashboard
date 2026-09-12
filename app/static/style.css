@@ -589,7 +589,8 @@ header:hover {
 .card-top {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
+  gap: 8px;
   cursor: grab; /* 顶部区域支持抓取拖拽 */
   user-select: none;
 }
@@ -601,12 +602,15 @@ header:hover {
 .account-main-info {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
 }
 
 .account-avatar {
-  width: 46px;
-  height: 46px;
+  width: 44px;
+  height: 44px;
   border-radius: var(--radius);
   background: linear-gradient(135deg, #f8fafc 0%, #edf2f7 100%);
   color: #0f172a;
@@ -617,19 +621,24 @@ header:hover {
   font-size: 17px;
   font-weight: 800;
   box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  flex-shrink: 0;
 }
 
 .account-name-block {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
 }
 
 .account-name-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .account-name-text {
@@ -646,6 +655,10 @@ header:hover {
   border: 1px dashed transparent;
   transition: all 0.15s ease;
   user-select: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .account-name-text:hover {
@@ -663,6 +676,7 @@ header:hover {
   opacity: 0;
   transition: opacity 0.15s ease;
   color: #64748b;
+  flex-shrink: 0;
 }
 
 .inline-name-input {
@@ -681,13 +695,13 @@ header:hover {
 }
 
 .account-phone {
-  font-size: 11.5px;
+  font-size: 11px;
   color: var(--text-muted);
   display: flex;
   align-items: center;
-  gap: 5px;
-  flex-wrap: nowrap;
-  white-space: nowrap;
+  gap: 4px;
+  flex-wrap: wrap;
+  line-height: 1.4;
 }
 
 /* 药丸徽标 Pill Badge (极简紧凑规范) */

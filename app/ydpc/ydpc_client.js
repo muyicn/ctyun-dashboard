@@ -174,8 +174,16 @@ class YdpcClient {
       this.metrics.status = 'offline';
       if (this.account.stats) this.account.stats.keepAliveStatus = 'offline';
       const errMsg = err.message || '';
-      if (errMsg.includes('用完') || errMsg.includes('已用尽') || errMsg.includes('到期') || errMsg.includes('欠费')) {
+      if (errMsg.includes('用完') || errMsg.includes('已用尽') || errMsg.includes('计费周期') || errMsg.includes('到期') || errMsg.includes('欠费')) {
         this.metrics.lastHeartbeatResult = `时长已耗尽 (${errMsg})`;
+        if (currentVm) {
+          currentVm.durationMode = 'limited';
+          currentVm.remainText = '⏱️ 0小时';
+          currentVm.remainHours = 0;
+          currentVm._durationExhausted = true;
+        }
+        this.metrics.remainText = '⏱️ 0小时';
+        this.metrics.remainHours = 0;
       } else {
         this.metrics.lastHeartbeatResult = `CAG 握手受阻: ${errMsg}`;
       }
@@ -254,17 +262,18 @@ class YdpcClient {
             // 1. 判断是否为独立子账号 (子账号无权通过 API 自主开机，必须避免循环重试)
             const isSubAccount = this.account.accountType === 'sub';
 
-            // 2. 判断是否为限时套餐且时长已耗尽 (如 20小时到期/剩余0小时/负数/月包用尽)
-            const isLimitedExpired = (
+            // 2. 判断是否为限时套餐且时长已耗尽 (如 20小时到期/剩余0小时/负数/月包用尽/CAG报错时长已用完)
+            const isLimitedExpired = vm._durationExhausted || (
               vm.durationMode === 'limited' && (
                 vm.remainHours <= 0 || 
                 (typeof vm.remainDurationTime === 'number' && vm.remainDurationTime <= 0) ||
                 String(vm.remainText || '').includes('0小时') ||
-                String(vm.remainText || '').includes('已耗尽')
+                String(vm.remainText || '').includes('已耗尽') ||
+                String(vm.remainText || '').includes('用完')
               )
             ) || (
               (String(vm.skuName || '').includes('20小时') || String(vm.vmName || '').includes('20小时') || String(vm.skuName || '').includes('月包')) &&
-              (vm.remainHours <= 0 || (typeof vm.remainDurationTime === 'number' && vm.remainDurationTime <= 0) || String(vm.remainText || '').includes('0小时'))
+              (vm.remainHours <= 0 || (typeof vm.remainDurationTime === 'number' && vm.remainDurationTime <= 0) || String(vm.remainText || '').includes('0小时') || String(vm.remainText || '').includes('已耗尽') || String(vm.remainText || '').includes('用完'))
             );
 
             // 3. 自动开机守护逻辑 (加入全量熔断与状态抑制)
@@ -290,15 +299,30 @@ class YdpcClient {
               }
             }
 
-            // 4. 发送 SOHO 心跳 (仅在机器开启时或进行 SOHO 保活)
-            if (this.account.features?.sohoHeartbeat !== false) {
+            // 4. 发送 SOHO 心跳 (仅在机器开启且时长未耗尽时进行 SOHO 保活)
+            if (this.account.features?.sohoHeartbeat !== false && !isLimitedExpired && !isVmOff) {
               await this.sendHeartbeat(vm.userServiceId).catch(() => {});
             }
 
-            // 5. 执行 CAG TCP 握手保活 (仅在机器运行时有效握手)
-            if (this.account.features?.cagKeepAlive !== false && !isVmOff) {
+            // 5. 执行 CAG TCP 握手保活 (仅在机器运行中且时长未耗尽时有效握手)
+            if (this.account.features?.cagKeepAlive !== false && !isVmOff && !isLimitedExpired) {
               await this.pingCag(vm.userServiceId, 3).catch(e => {
-                this.appendLog('CAG', `[${accName}][${vm.vmName}] CAG 握手异常: ${e.message}`, 'warning', accName, 'ydpc');
+                const errMsg = e.message || '';
+                if (errMsg.includes('用完') || errMsg.includes('已用尽') || errMsg.includes('计费周期') || errMsg.includes('到期')) {
+                  vm._durationExhausted = true;
+                  vm.durationMode = 'limited';
+                  vm.remainText = '⏱️ 0小时';
+                  vm.remainHours = 0;
+                  this.metrics.remainText = '⏱️ 0小时';
+                  this.metrics.status = 'offline';
+                  this.metrics.lastHeartbeatResult = '当前计费周期时长已用完 (待命中)';
+                  if (!vm._hasWarnedExhausted) {
+                    this.appendLog('CAG', `[${accName}][${vm.vmName}] 当前计费周期时长已用完，保活守护已自动转为静默休眠待命模式`, 'info', accName, 'ydpc');
+                    vm._hasWarnedExhausted = true;
+                  }
+                } else {
+                  this.appendLog('CAG', `[${accName}][${vm.vmName}] CAG 握手异常: ${errMsg}`, 'warning', accName, 'ydpc');
+                }
               });
             }
           }
