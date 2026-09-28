@@ -504,6 +504,11 @@ function isPrivateIpOrHost(hostname) {
     if (h === '::1' || h === '::') return true;
     if (h.startsWith('fe80:')) return true; // link-local
     if (h.startsWith('fc00:') || h.startsWith('fd00:')) return true; // ULA
+    // IPv4-mapped/compatible IPv6 addresses (e.g. ::ffff:127.0.0.1) must be
+    // unwrapped and re-checked against the IPv4 private-range rules above,
+    // otherwise they bypass the checks entirely.
+    const mapped = h.match(/^::(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/);
+    if (mapped && isPrivateIpOrHost(mapped[1])) return true;
   }
 
   return false;
