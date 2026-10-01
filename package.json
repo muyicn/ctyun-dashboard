@@ -12,6 +12,7 @@
     "verify": "node tests/syntax_check.js && node tests/regression.test.js && node tests/mutation_check.js && node analysis/smoke_check.js"
   },
   "dependencies": {
-    "ws": "^8.21.3"
+    "ws": "^8.21.3",
+    "https-proxy-agent": "^7.0.6"
   }
 }

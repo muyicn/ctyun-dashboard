@@ -12,6 +12,10 @@ if (typeof dns.setDefaultResultOrder === 'function') {
 }
 
 const WebSocket = require('ws');
+const { HttpsProxyAgent } = require('https-proxy-agent');
+// The ws package does not apply HTTP(S)_PROXY environment variables itself.
+const wsProxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+const wsProxyAgent = wsProxyUrl ? new HttpsProxyAgent(wsProxyUrl) : undefined;
 const CtYunEncryption = require('./app/ctyun_encryption');
 const { executeNativeAiChat, executeNativeSign, executeNativeHang } = require('./app/tasks/native_tasks');
 const { AuthManager } = require('./app/auth_manager');
@@ -2482,6 +2486,7 @@ class CtYunClient {
 
       this.ws = new WebSocket(wsUrl, {
         headers: { Origin: 'https://pc.ctyun.cn' },
+        agent: wsProxyAgent,
         rejectUnauthorized: false
       });
 
